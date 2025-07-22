@@ -7,3 +7,5 @@ tqdm
 python-dotenv
 rich
 openai
+huggingface_hub
+tenacity

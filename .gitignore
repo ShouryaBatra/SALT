@@ -1,3 +1,4 @@
 venv/
 qwen2.5-1.5b/
 datasets/
+.env
