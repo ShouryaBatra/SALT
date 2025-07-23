@@ -326,10 +326,12 @@ def main():
 
                 prompt = [
                     {
-                        "role": "user",
+                        "role": "system",
                         "content": formatted_sys_prompt
-                        + "\n\n"
-                        + formatted_situation_prompt,
+                    },
+                    {
+                        "role": "user",
+                        "content": formatted_situation_prompt,
                     }
                 ]
                 if "nemotron" in args.model.lower():
@@ -373,6 +375,7 @@ def main():
                             else False,
                         )
                         print(f"\nFormatted with chat template:\n{formatted_chat}")
+                        print(f"\n=== END CHAT TEMPLATE ===\n")
 
     if not prompts:
         print("Error: No prompts found in the dataset")
@@ -556,7 +559,6 @@ def main():
             generation_config="auto",
             trust_remote_code=True,
             gpu_memory_utilization=0.7 if "s1" in args.model.lower() else 0.9,
-            dtype="float16",
         )
 
         sampling_params = llm.get_default_sampling_params()
@@ -654,6 +656,7 @@ def main():
                 )
 
             else:
+                # Use the standard chat approach that works in other functions
                 outputs = llm.chat(
                     prompts,
                     sampling_params=sampling_params,
