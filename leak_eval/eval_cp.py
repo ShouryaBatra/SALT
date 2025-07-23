@@ -559,6 +559,7 @@ def main():
             generation_config="auto",
             trust_remote_code=True,
             gpu_memory_utilization=0.7 if "s1" in args.model.lower() else 0.9,
+            dtype="float16",
         )
 
         sampling_params = llm.get_default_sampling_params()
