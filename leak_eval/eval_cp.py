@@ -99,6 +99,12 @@ def parse_args():
         help="Prompt type to use from prompts/cp_open_ended_chat directory",
     )
     parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Batch size for generation (auto-detected based on GPU memory if not specified)",
+    )
+    parser.add_argument(
         "--prompt_inj",
         type=str,
         default=None,
@@ -127,6 +133,127 @@ def load_data(input_file: str) -> List[Dict]:
     with open(input_file, "r") as f:
         data = json.load(f)
     return data
+
+def get_optimal_batch_size():
+    """Determine optimal batch size based on available GPU memory"""
+    if not torch.cuda.is_available():
+        return 1
+    
+    try:
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+        if gpu_memory > 40:  # A100 or similar
+            return 16
+        elif gpu_memory > 20:  # RTX 4090, V100, etc.
+            return 8
+        elif gpu_memory > 10:  # RTX 3080, etc.
+            return 4
+        else:  # Smaller GPUs
+            return 2
+    except:
+        return 4  # Safe default
+
+def prepare_batch_prompts(prompts, tokenizer):
+    """Convert prompt structures to formatted text for batch processing"""
+    batch_texts = []
+    for prompt in prompts:
+        if hasattr(tokenizer, "apply_chat_template"):
+            prompt_text = tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            prompt_text = prompt if isinstance(prompt, str) else prompt[0]["content"]
+        batch_texts.append(prompt_text)
+    return batch_texts
+
+def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_layer_idx=15):
+    """Generate a batch of outputs while capturing activations"""
+    activations = []
+    
+    def activation_hook(module, input, output):
+        if isinstance(output, tuple):
+            activation = output[0]
+        else:
+            activation = output
+        # Store activation for each item in the batch
+        activations.append(activation.detach().cpu())
+    
+    # Set up activation hook
+    hook_handle = model.model.layers[target_layer_idx].register_forward_hook(activation_hook)
+    
+    try:
+        # Tokenize batch with padding
+        inputs = tokenizer(
+            batch_texts, 
+            return_tensors="pt", 
+            padding=True, 
+            truncation=True,
+            max_length=4096  # Reasonable limit
+        ).to(model.device)
+        
+        # Set up generation parameters
+        gen_kwargs = {
+            "max_new_tokens": args.max_tokens,
+            "pad_token_id": tokenizer.eos_token_id,
+        }
+        
+        # Only use sampling if temperature is specified
+        if args.temperature is not None:
+            gen_kwargs["do_sample"] = True
+            gen_kwargs["temperature"] = args.temperature
+        else:
+            gen_kwargs["do_sample"] = False
+            
+        if args.top_p is not None:
+            gen_kwargs["top_p"] = args.top_p
+            gen_kwargs["do_sample"] = True
+        if args.top_k is not None:
+            gen_kwargs["top_k"] = args.top_k
+            gen_kwargs["do_sample"] = True
+        if args.repetition_penalty is not None:
+            gen_kwargs["repetition_penalty"] = args.repetition_penalty
+        
+        # Generate batch
+        with torch.no_grad():
+            output_ids = model.generate(**inputs, **gen_kwargs)
+        
+        # Decode outputs
+        outputs = []
+        for i, ids in enumerate(output_ids):
+            # Remove input tokens to get only generated text
+            input_length = len(inputs['input_ids'][i])
+            # Find the actual end of input (excluding padding)
+            input_tokens = inputs['input_ids'][i]
+            actual_input_length = (input_tokens != tokenizer.pad_token_id).sum().item()
+            
+            generated_ids = ids[actual_input_length:]
+            output_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            outputs.append(output_text)
+        
+        # The hook captures activations for the entire batch
+        # We need to split them by batch items
+        batch_activations = []
+        if activations:
+            # Take the last captured activation (from the generation)
+            last_activation = activations[-1]
+            # Split by batch dimension
+            for i in range(len(batch_texts)):
+                batch_activations.append(last_activation[i])
+        
+        return outputs, batch_activations
+        
+    finally:
+        hook_handle.remove()
+
+def check_memory_usage():
+    """Check current GPU memory usage"""
+    if torch.cuda.is_available():
+        memory_used = torch.cuda.memory_allocated() / (1024**3)
+        memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        usage_ratio = memory_used / memory_total
+        return usage_ratio, memory_used, memory_total
+    return 0.0, 0.0, 0.0
 
 def main():
     og_time = time.time()
@@ -295,6 +422,11 @@ def main():
     model_name = get_provider_model_name(args.model, args.model_provider)
     print(f"Loading model {model_name} from HuggingFace Transformers")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    
+    # Set pad token if not present
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         trust_remote_code=True,
@@ -303,65 +435,139 @@ def main():
     )
     model.eval()
 
-    # ---- Activation Extraction ------
+    # Determine batch size
+    if args.batch_size is None:
+        args.batch_size = get_optimal_batch_size()
+        print(f"Auto-detected batch size: {args.batch_size}")
+    else:
+        print(f"Using specified batch size: {args.batch_size}")
+
+    # Check initial memory
+    usage_ratio, memory_used, memory_total = check_memory_usage()
+    print(f"Initial GPU memory usage: {memory_used:.1f}/{memory_total:.1f} GB ({usage_ratio:.1%})")
+
+    # ---- Batch Processing with Activation Extraction ------
     target_layer_idx = 15  # 16th block, adjust as desired
-    activations = []
-    def activation_hook(module, input, output):
-        # Fix: handle tuple output
-        if isinstance(output, tuple):
-            activation = output[0]
-        else:
-            activation = output
-        activations.append(activation.detach().cpu())
-    hook_handle = model.model.layers[target_layer_idx].register_forward_hook(activation_hook)
-    # -------------------------------
-
     all_outputs = []
-    results = []
-    for idx, prompt in enumerate(prompts):
-        if hasattr(tokenizer, "apply_chat_template"):
-            prompt_text = tokenizer.apply_chat_template(
-                prompt,
-                tokenize=False,
-                add_generation_prompt=True
+    all_activations = []
+    
+    # Process prompts in batches
+    total_batches = (len(prompts) + args.batch_size - 1) // args.batch_size
+    print(f"Processing {len(prompts)} prompts in {total_batches} batches of size {args.batch_size}")
+    
+    for batch_idx in range(0, len(prompts), args.batch_size):
+        batch_end = min(batch_idx + args.batch_size, len(prompts))
+        batch_prompts = prompts[batch_idx:batch_end]
+        batch_indices = valid_indices[batch_idx:batch_end]
+        
+        current_batch_num = batch_idx // args.batch_size + 1
+        print(f"Processing batch {current_batch_num}/{total_batches} ({len(batch_prompts)} prompts)...")
+        
+        # Prepare batch texts
+        batch_texts = prepare_batch_prompts(batch_prompts, tokenizer)
+        
+        # Generate batch with activations
+        try:
+            batch_outputs, batch_activations = generate_batch_with_activations(
+                model, tokenizer, batch_texts, args, target_layer_idx
             )
-        else:
-            prompt_text = prompt if isinstance(prompt, str) else prompt[0]["content"]
-        inputs = tokenizer([prompt_text], return_tensors="pt").to(model.device)
-        gen_kwargs = dict(
-            max_new_tokens=args.max_tokens,
-        )
-        if args.temperature is not None:
-            gen_kwargs["temperature"] = args.temperature
-        if args.top_p is not None:
-            gen_kwargs["top_p"] = args.top_p
-        if args.top_k is not None:
-            gen_kwargs["top_k"] = args.top_k
-        if args.repetition_penalty is not None:
-            gen_kwargs["repetition_penalty"] = args.repetition_penalty
+            
+            all_outputs.extend(batch_outputs)
+            all_activations.extend(batch_activations)
+            
+            # Update data for this batch
+            for i, (output_text, activation) in enumerate(zip(batch_outputs, batch_activations)):
+                idx_in_batch = batch_idx + i
+                data_idx = valid_indices[idx_in_batch]
+                prompt_text = batch_texts[i]
+                
+                data[data_idx]["model_output"] = [output_text]
+                # Extract think/reason/answer segments
+                reasoning, answer = split_by_think(output_text, end_think_token)
+                data[data_idx]["model_reasoning"] = [reasoning]
+                data[data_idx]["model_answer"] = [answer]
+                data[data_idx]["prompt"] = prompt_text
+                data[data_idx]["input_token_length"] = len(tokenizer.encode(prompt_text))
+                data[data_idx]["output_token_length"] = [len(tokenizer.encode(output_text))]
+                data[data_idx]["reasoning_token_length"] = [len(tokenizer.encode(reasoning))]
+                data[data_idx]["answer_token_length"] = [len(tokenizer.encode(answer))]
+                if end_think_token is not None:
+                    data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
+                else:
+                    data[data_idx]["close_think_tokens"] = [0]
+                # Save activation
+                data[data_idx]["activation"] = activation.tolist()
+            
+        except Exception as e:
+            print(f"Error processing batch {current_batch_num}: {e}")
+            # Fall back to sequential processing for this batch
+            print("Falling back to sequential processing for this batch...")
+            for i, prompt in enumerate(batch_prompts):
+                idx_in_batch = batch_idx + i
+                data_idx = valid_indices[idx_in_batch]
+                
+                if hasattr(tokenizer, "apply_chat_template"):
+                    prompt_text = tokenizer.apply_chat_template(
+                        prompt,
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                else:
+                    prompt_text = prompt if isinstance(prompt, str) else prompt[0]["content"]
+                
+                inputs = tokenizer([prompt_text], return_tensors="pt").to(model.device)
+                gen_kwargs = dict(max_new_tokens=args.max_tokens)
+                if args.temperature is not None:
+                    gen_kwargs["temperature"] = args.temperature
+                if args.top_p is not None:
+                    gen_kwargs["top_p"] = args.top_p
+                if args.top_k is not None:
+                    gen_kwargs["top_k"] = args.top_k
+                if args.repetition_penalty is not None:
+                    gen_kwargs["repetition_penalty"] = args.repetition_penalty
 
-        output_ids = model.generate(**inputs, **gen_kwargs)
-        output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-        all_outputs.append(output_text)
-        data_idx = valid_indices[idx]
-        data[data_idx]["model_output"] = [output_text]
-        # Extract think/reason/answer segments
-        reasoning, answer = split_by_think(output_text, end_think_token)
-        data[data_idx]["model_reasoning"] = [reasoning]
-        data[data_idx]["model_answer"] = [answer]
-        data[data_idx]["prompt"] = prompt_text
-        data[data_idx]["input_token_length"] = len(tokenizer.encode(prompt_text))
-        data[data_idx]["output_token_length"] = [len(tokenizer.encode(output_text))]
-        data[data_idx]["reasoning_token_length"] = [len(tokenizer.encode(reasoning))]
-        data[data_idx]["answer_token_length"] = [len(tokenizer.encode(answer))]
-        if end_think_token is not None:
-            data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
-        else:
-            data[data_idx]["close_think_tokens"] = [0]
-        # Save activation (last one captured corresponds to this generation)
-        data[data_idx]["activation"] = activations[-1].tolist()
-
-    hook_handle.remove()
+                # Single item processing with activation
+                activations = []
+                def activation_hook(module, input, output):
+                    if isinstance(output, tuple):
+                        activation = output[0]
+                    else:
+                        activation = output
+                    activations.append(activation.detach().cpu())
+                
+                hook_handle = model.model.layers[target_layer_idx].register_forward_hook(activation_hook)
+                try:
+                    output_ids = model.generate(**inputs, **gen_kwargs)
+                    output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+                    all_outputs.append(output_text)
+                    
+                    data[data_idx]["model_output"] = [output_text]
+                    reasoning, answer = split_by_think(output_text, end_think_token)
+                    data[data_idx]["model_reasoning"] = [reasoning]
+                    data[data_idx]["model_answer"] = [answer]
+                    data[data_idx]["prompt"] = prompt_text
+                    data[data_idx]["input_token_length"] = len(tokenizer.encode(prompt_text))
+                    data[data_idx]["output_token_length"] = [len(tokenizer.encode(output_text))]
+                    data[data_idx]["reasoning_token_length"] = [len(tokenizer.encode(reasoning))]
+                    data[data_idx]["answer_token_length"] = [len(tokenizer.encode(answer))]
+                    if end_think_token is not None:
+                        data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
+                    else:
+                        data[data_idx]["close_think_tokens"] = [0]
+                    data[data_idx]["activation"] = activations[-1].tolist()
+                finally:
+                    hook_handle.remove()
+        
+        # Clear GPU cache between batches
+        torch.cuda.empty_cache()
+        
+        # Check memory usage
+        usage_ratio, memory_used, memory_total = check_memory_usage()
+        if usage_ratio > 0.85:
+            print(f"High memory usage: {memory_used:.1f}/{memory_total:.1f} GB ({usage_ratio:.1%})")
+    
+    print(f"Completed processing all {len(prompts)} prompts")
+    # -------------------------------
 
     # Filter data to only include processed examples
     filtered_data = [data[i] for i in valid_indices]
@@ -408,6 +614,7 @@ def main():
         "positive_examples": sum(1 for item in filtered_data if item.get("label") == 1),
         "negative_examples": sum(1 for item in filtered_data if item.get("label") == 0),
         "time_required": str(timedelta(seconds=int(time.time() - og_time))),
+        "batch_size_used": args.batch_size,
         "avg_output_length": avg_output_length,
         "avg_reasoning_length": avg_reasoning_length,
         "avg_answer_length": avg_answer_length,
