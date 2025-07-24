@@ -1,6 +1,6 @@
 import os
 
-# this avoids nccl hanging
+# This avoids NCCL hangs on some Colab/GPU systems
 os.environ["NCCL_P2P_DISABLE"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -19,8 +19,7 @@ from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from transformers import AutoTokenizer, GenerationConfig
-from vllm import LLM, SamplingParams
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from cp_eval_utils import (
     calculate_openai_cost,
@@ -32,26 +31,14 @@ from cp_eval_utils import (
     split_by_think,
 )
 from generate_utils import (
-    UserDataLogitsProcessor,
-    calculate_openrouter_cost,
-    display_generation_config,
-    generate_openrouter_hide_data,
-    generate_with_budget,
-    generate_with_openrouter,
-    generate_with_openrouter_rana,
-    generate_with_openrouter_swap,
-    generate_with_rana,
-    generate_with_swap,
     get_provider_model_name,
 )
 
-# Define models that should primarily use API providers
 API_ONLY_MODELS = {
     "deepseek-ai/deepseek-r1",
     "deepseek-ai/deepseek-v3",
     "deepseek-ai/deepseek-v3-0324",
 }
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -80,7 +67,7 @@ def parse_args():
     parser.add_argument(
         "--max_tokens",
         type=int,
-        default=5000,
+        default=500,
         help="Maximum number of tokens to generate",
     )
     parser.add_argument("--temperature", type=float, help="Temperature for sampling")
@@ -94,9 +81,9 @@ def parse_args():
     parser.add_argument(
         "--model_provider",
         type=str,
-        default="vllm",
-        choices=["vllm", "openrouter"],
-        help="Model provider to use (vllm, openrouter)",
+        default="hf",
+        choices=["hf", "openrouter"],
+        help="Model provider to use (hf, openrouter)",
     )
     parser.add_argument(
         "--ref_answer",
@@ -110,22 +97,6 @@ def parse_args():
         required=True,
         default=None,
         help="Prompt type to use from prompts/cp_open_ended_chat directory",
-    )
-    parser.add_argument(
-        "--eager",
-        action="store_true",
-        help="Enable eager mode for VLLM execution",
-    )
-    parser.add_argument(
-        "--hide_data",
-        action="store_true",
-        help="Hide user data in generated outputs",
-    )
-    parser.add_argument(
-        "--budget_thinking",
-        type=int,
-        default=None,
-        help="Token budget for forcing thinking phase",
     )
     parser.add_argument(
         "--prompt_inj",
@@ -150,31 +121,16 @@ def parse_args():
         default="openrouter_settings/default_settings.json",
         help="Path to OpenRouter settings JSON file",
     )
-    parser.add_argument(
-        "--rana",
-        action="store_true",
-        help="Enable Reason-Anonymize-Answer (RAnA) flow",
-    )
-    parser.add_argument(
-        "--swap",
-        action="store_true",
-        help="Enable Reason-Swap-Answer (RSwA) flow",
-    )
     return parser.parse_args()
-
 
 def load_data(input_file: str) -> List[Dict]:
     with open(input_file, "r") as f:
         data = json.load(f)
     return data
 
-
 def main():
     og_time = time.time()
     args = parse_args()
-    if args.hide_data:
-        os.environ["VLLM_USE_V1"] = "0"  # need for per-request logit processing
-    # Set random seeds
     seed = args.seed
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
@@ -182,39 +138,16 @@ def main():
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-    # Add the number of visible GPUs to args
     args.num_gpus = torch.cuda.device_count()
-
-    # Create rich console for pretty printing
     console = Console()
-
-    # Pretty print the arguments using rich
     args_table = Table(title="Execution Arguments", box=box.ROUNDED)
     args_table.add_column("Argument", style="cyan")
     args_table.add_column("Value", style="green")
-
     for arg, value in vars(args).items():
         args_table.add_row(arg, str(value))
-
     console.print()
     console.print(Panel(args_table, expand=False))
     console.print()
-
-    # Check if RAnA is enabled - it only works with reasoning-based prompts
-    if args.rana:
-        if not ("cot" in args.prompt_type or "reasoning" in args.prompt_type):
-            print("Error: RAnA can only be used with 'cot' or 'reasoning' prompt types")
-            return
-        print("RAnA (Reason-Anonymize-Answer) mode enabled")
-
-    # Check if hide_data is enabled - it only works with reasoning-based prompts
-    if args.hide_data:
-        if not ("cot" in args.prompt_type or "reasoning" in args.prompt_type):
-            print(
-                "Error: hide_data can only be used with 'cot' or 'reasoning' prompt types"
-            )
-            return
-        print("Data hiding during thinking phase enabled")
 
     # Load data
     print(f"Loading data from {args.input_file}")
@@ -258,7 +191,6 @@ def main():
         start_think_token = None
         end_think_token = None
 
-    # Extract prompts from the dataset
     prompts = []
     valid_indices = []
 
@@ -284,11 +216,11 @@ def main():
         print(f"Error: Prompt file {prompt_file} not found")
         return
 
-    # Handle prompt injection if specified
+    # Prompt injection
     if args.prompt_inj:
         try:
             with open(args.prompt_inj, "r") as f:
-                injection = f.readline().strip()  # Get the first line
+                injection = f.readline().strip()
                 print(f"Loading prompt injection from {args.prompt_inj}: {injection}")
         except FileNotFoundError:
             print(f"Error: Prompt injection file {args.prompt_inj} not found")
@@ -298,9 +230,7 @@ def main():
 
     for i, item in enumerate(data):
         if "prompt" in item:
-            # Format the prompt using the template if available
             if sys_prompt_template is not None:
-                # Extract necessary fields from the data item for formatting
                 field = item.get("field", "").replace("_", " ").capitalize()
                 question = f"Could you please share the {field}?"
                 formatted_sys_prompt = sys_prompt_template.format(
@@ -321,7 +251,6 @@ def main():
                     if injection
                     else formatted_situation_prompt
                 )
-                # Store the formatted situation prompt in the data item for GPT evaluation
                 data[i]["formatted_situation_prompt"] = formatted_situation_prompt
 
                 prompt = [
@@ -350,390 +279,98 @@ def main():
                             "content": "<think> Let's think step by step.",
                         }
                     )
-
-                # Check if the model is designated as API-only
-                is_api_only_model = args.model.lower() in API_ONLY_MODELS
-
                 prompts.append(prompt)
                 valid_indices.append(i)
                 if i == 0:
-                    # Print the raw prompt
                     print(f"Example prompt:\n{prompt}")
-                    # Load the tokenizer
-                    tokenizer = AutoTokenizer.from_pretrained(args.model)
-
-                    # Apply chat template if available
-                    if hasattr(tokenizer, "apply_chat_template"):
-                        formatted_chat = tokenizer.apply_chat_template(
-                            prompt,
-                            tokenize=False,
-                            add_generation_prompt=False
-                            if "cot" in args.prompt_type
-                            else True,
-                            continue_final_message=True
-                            if "cot" in args.prompt_type
-                            else False,
-                        )
-                        print(f"\nFormatted with chat template:\n{formatted_chat}")
-                        print(f"\n=== END CHAT TEMPLATE ===\n")
-
     if not prompts:
         print("Error: No prompts found in the dataset")
         return
-
-    # Apply limit if specified
     if args.limit is not None and args.limit > 0:
         prompts = prompts[: args.limit]
         valid_indices = valid_indices[: args.limit]
         print(f"Limiting to first {args.limit} prompts")
-
     print(f"Processing {len(prompts)} prompts")
 
-    # Check if should use API or vLLM
-    is_api_only_model = args.model.lower() in API_ONLY_MODELS
-    use_api = is_api_only_model and args.model_provider in [
-        "openrouter",
-        "deepseek",
-    ]
-
-    # Get the correct model name format for the specified provider
     model_name = get_provider_model_name(args.model, args.model_provider)
+    print(f"Loading model {model_name} from HuggingFace Transformers")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        torch_dtype="auto",
+        device_map="auto"
+    )
+    model.eval()
 
-    if use_api:
-        print(
-            f"Using {args.model_provider.upper()} API for model {model_name} (specified as: {args.model})"
-        )
-        # We still need the tokenizer for token counting
-        tokenizer = AutoTokenizer.from_pretrained(args.model)
-        try:
-            gen_conf_hf = GenerationConfig.from_pretrained(args.model).to_diff_dict()
-        except Exception:
-            print(
-                f"Warning: Could not load generation config from {args.model}. Using default configuration."
-            )
-            gen_conf_hf = {"temperature": 0.6, "top_p": 0.95}
+    # ---- Activation Extraction ------
+    target_layer_idx = 15  # 16th block, adjust as desired
+    activations = []
+    def activation_hook(module, input, output):
+        # Fix: handle tuple output
+        if isinstance(output, tuple):
+            activation = output[0]
+        else:
+            activation = output
+        activations.append(activation.detach().cpu())
+    hook_handle = model.model.layers[target_layer_idx].register_forward_hook(activation_hook)
+    # -------------------------------
 
-        # Set up sampling parameters
-        sampling_params = SamplingParams()
-
-        # Temperature: use args if present, otherwise use gen_conf_deepseek or default to 0.7
-        if args.temperature is not None:
-            sampling_params.temperature = args.temperature
-        elif "temperature" in gen_conf_hf:
-            sampling_params.temperature = gen_conf_hf["temperature"]
-
-        # Top-p: use args if present, otherwise use gen_conf_deepseek
-        if args.top_p is not None:
-            sampling_params.top_p = args.top_p
-        elif "top_p" in gen_conf_hf:
-            sampling_params.top_p = gen_conf_hf["top_p"]
-
-        # Repetition penalty: use args if present, otherwise use gen_conf_deepseek
-        if args.repetition_penalty is not None:
-            sampling_params.repetition_penalty = args.repetition_penalty
-        elif "repetition_penalty" in gen_conf_hf:
-            sampling_params.repetition_penalty = gen_conf_hf["repetition_penalty"]
-
-        # Top-k: use args if present, otherwise use gen_conf_deepseek
-        if args.top_k is not None:
-            sampling_params.top_k = args.top_k
-        elif "top_k" in gen_conf_hf:
-            sampling_params.top_k = gen_conf_hf["top_k"]
-        sampling_params.max_tokens = args.max_tokens
-        sampling_params.seed = args.seed
-        sampling_params.skip_special_tokens = False
-
-        # Display generation configuration and store it for later output
-        gen_conf = display_generation_config(console, sampling_params)
-
-        # Generate outputs using selected API
-        if args.model_provider == "openrouter":
-            if args.swap:
-                # For RSwA mode, use our specialized generation function
-                outputs, generation_ids, generation_id_to_prompt_idx = (
-                    generate_with_openrouter_swap(
-                        prompts,
-                        data,
-                        valid_indices,
-                        model_name,
-                        sampling_params,
-                        args,
-                        start_think_token,
-                        end_think_token,
-                    )
-                )
-                try:
-                    api_key = os.getenv("OPENROUTER_API_KEY")
-                    total_cost, provider_info = calculate_openrouter_cost(
-                        generation_ids, api_key
-                    )
-                    for gen_id, info in provider_info.items():
-                        idx = generation_id_to_prompt_idx.get(gen_id)
-                        if idx is not None and idx < len(outputs):
-                            if not hasattr(outputs[idx], "provider_info"):
-                                outputs[idx].provider_info = []
-                            outputs[idx].provider_info.append(info)
-                    print(f"Total OpenRouter cost: ${total_cost:.5f}")
-                except Exception as e:
-                    print(f"Warning: Failed to calculate OpenRouter cost: {e}")
-            elif args.rana and (
-                "cot" in args.prompt_type or "reasoning" in args.prompt_type
-            ):
-                # For RAnA mode, use our specialized generation function
-                outputs, generation_ids, generation_id_to_prompt_idx = (
-                    generate_with_openrouter_rana(
-                        prompts,
-                        data,
-                        valid_indices,
-                        model_name,
-                        sampling_params,
-                        args,
-                        start_think_token,
-                        end_think_token,
-                    )
-                )
-
-                try:
-                    api_key = os.getenv("OPENROUTER_API_KEY")
-                    total_cost, provider_info = calculate_openrouter_cost(
-                        generation_ids, api_key
-                    )
-                    for gen_id, info in provider_info.items():
-                        idx = generation_id_to_prompt_idx.get(gen_id)
-                        if idx is not None and idx < len(outputs):
-                            if not hasattr(outputs[idx], "provider_info"):
-                                outputs[idx].provider_info = []
-                            outputs[idx].provider_info.append(info)
-                    print(f"Total OpenRouter cost: ${total_cost:.5f}")
-                except Exception as e:
-                    print(f"Warning: Failed to calculate OpenRouter cost: {e}")
-            elif args.hide_data and (
-                "cot" in args.prompt_type or "reasoning" in args.prompt_type
-            ):
-                # For hide_data mode, use our specialized generation function
-                outputs, generation_ids, generation_id_to_prompt_idx = (
-                    generate_openrouter_hide_data(
-                        prompts,
-                        data,
-                        valid_indices,
-                        model_name,
-                        sampling_params,
-                        args,
-                        end_think_token,
-                    )
-                )
-
-                try:
-                    api_key = os.getenv("OPENROUTER_API_KEY")
-                    total_cost, provider_info = calculate_openrouter_cost(
-                        generation_ids, api_key
-                    )
-                    for gen_id, info in provider_info.items():
-                        idx = generation_id_to_prompt_idx.get(gen_id)
-                        if idx is not None and idx < len(outputs):
-                            if not hasattr(outputs[idx], "provider_info"):
-                                outputs[idx].provider_info = []
-                            outputs[idx].provider_info.append(info)
-                    print(f"Total OpenRouter cost: ${total_cost:.5f}")
-                except Exception as e:
-                    print(f"Warning: Failed to calculate OpenRouter cost: {e}")
-
-            else:
-                outputs = generate_with_openrouter(
-                    prompts,
-                    model_name,
-                    sampling_params,
-                    args,
-                    end_think_token,
-                    is_cot=("cot" in args.prompt_type),
-                )
-    else:
-        # Initialize the LLM with vLLM
-        print(f"Loading model {model_name} with vLLM")
-        llm = LLM(
-            model=model_name,
-            tensor_parallel_size=torch.cuda.device_count(),
-            enable_prefix_caching=True,
-            max_model_len=10000,
-            enforce_eager=args.eager,
-            generation_config="auto",
-            trust_remote_code=True,
-            gpu_memory_utilization=0.7 if "s1" in args.model.lower() else 0.9,
-            dtype="float16",
-        )
-
-        sampling_params = llm.get_default_sampling_params()
-        if "nemotron" in args.model.lower():
-            if "vanilla" in args.prompt_type:
-                sampling_params.temperature = 0.0
-                sampling_params.top_p = 1.0
-                sampling_params.top_k = -1
-                sampling_params.repetition_penalty = 1.0
-            elif "reasoning" in args.prompt_type:
-                sampling_params.temperature = 0.6
-                sampling_params.top_p = 0.95
-
-        if args.temperature is not None:
-            sampling_params.temperature = args.temperature
-        if args.top_p is not None:
-            sampling_params.top_p = args.top_p
-        if args.repetition_penalty is not None:
-            sampling_params.repetition_penalty = args.repetition_penalty
-        if args.top_k is not None:
-            sampling_params.top_k = args.top_k
-        sampling_params.max_tokens = args.max_tokens
-        sampling_params.seed = args.seed
-        sampling_params.skip_special_tokens = False
-
-        # Display generation configuration and store it for later output
-        gen_conf = display_generation_config(console, sampling_params)
-
-        # Generate outputs using vLLM or budget forcing
-        if args.budget_thinking is not None:
-            # Use budget-forcing generation
-            outputs = generate_with_budget(
-                llm,
-                prompts,
-                sampling_params,
-                args,
-                start_think_token,
-                end_think_token,
-            )
-        # RAnA flow
-        elif args.rana and (
-            "cot" in args.prompt_type or "reasoning" in args.prompt_type
-        ):
-            # For RAnA mode, use our specialized generation function
-            outputs = generate_with_rana(
-                llm=llm,
-                prompts=prompts,
-                data=data,
-                valid_indices=valid_indices,
-                args=args,
-                model_name=model_name,
-                start_think_token=start_think_token,
-                end_think_token=end_think_token,
-                sampling_params=sampling_params,
-            )
-        elif args.swap:
-            # For RSwA mode (local), use our swap generation function
-            outputs = generate_with_swap(
-                llm=llm,
-                prompts=prompts,
-                data=data,
-                valid_indices=valid_indices,
-                args=args,
-                model_name=model_name,
-                start_think_token=start_think_token,
-                end_think_token=end_think_token,
-                sampling_params=sampling_params,
+    all_outputs = []
+    results = []
+    for idx, prompt in enumerate(prompts):
+        if hasattr(tokenizer, "apply_chat_template"):
+            prompt_text = tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True
             )
         else:
-            # Create separate sampling params for each prompt if hide_data is enabled
-            if args.hide_data and (
-                "cot" in args.prompt_type or "reasoning" in args.prompt_type
-            ):
-                print("Enabled user data hiding during thinking phase")
-                all_sampling_params = []
-                for i, item in enumerate(data):
-                    if i in valid_indices:
-                        # Clone the base sampling params
-                        params = sampling_params.clone()
-                        # Add the specific logit processor for this prompt's user data
-                        processor = UserDataLogitsProcessor(
-                            tokenizer=llm.get_tokenizer(),
-                            user_data=item.get("profile", {}),
-                            end_think_token=end_think_token,
-                        )
-                        params.logits_processors = [processor]
-                        all_sampling_params.append(params)
+            prompt_text = prompt if isinstance(prompt, str) else prompt[0]["content"]
+        inputs = tokenizer([prompt_text], return_tensors="pt").to(model.device)
+        gen_kwargs = dict(
+            max_new_tokens=args.max_tokens,
+        )
+        if args.temperature is not None:
+            gen_kwargs["temperature"] = args.temperature
+        if args.top_p is not None:
+            gen_kwargs["top_p"] = args.top_p
+        if args.top_k is not None:
+            gen_kwargs["top_k"] = args.top_k
+        if args.repetition_penalty is not None:
+            gen_kwargs["repetition_penalty"] = args.repetition_penalty
 
-                outputs = llm.chat(
-                    prompts,
-                    sampling_params=all_sampling_params,
-                    chat_template=llm.get_tokenizer().chat_template,
-                    add_generation_prompt=False if "cot" in args.prompt_type else True,
-                    continue_final_message=True if "cot" in args.prompt_type else False,
-                )
+        output_ids = model.generate(**inputs, **gen_kwargs)
+        output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        all_outputs.append(output_text)
+        data_idx = valid_indices[idx]
+        data[data_idx]["model_output"] = [output_text]
+        # Extract think/reason/answer segments
+        reasoning, answer = split_by_think(output_text, end_think_token)
+        data[data_idx]["model_reasoning"] = [reasoning]
+        data[data_idx]["model_answer"] = [answer]
+        data[data_idx]["prompt"] = prompt_text
+        data[data_idx]["input_token_length"] = len(tokenizer.encode(prompt_text))
+        data[data_idx]["output_token_length"] = [len(tokenizer.encode(output_text))]
+        data[data_idx]["reasoning_token_length"] = [len(tokenizer.encode(reasoning))]
+        data[data_idx]["answer_token_length"] = [len(tokenizer.encode(answer))]
+        if end_think_token is not None:
+            data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
+        else:
+            data[data_idx]["close_think_tokens"] = [0]
+        # Save activation (last one captured corresponds to this generation)
+        data[data_idx]["activation"] = activations[-1].tolist()
 
-            else:
-                # Use the standard chat approach that works in other functions
-                outputs = llm.chat(
-                    prompts,
-                    sampling_params=sampling_params,
-                    chat_template=llm.get_tokenizer().chat_template,
-                    add_generation_prompt=False if "cot" in args.prompt_type else True,
-                    continue_final_message=True if "cot" in args.prompt_type else False,
-                )
+    hook_handle.remove()
 
-        tokenizer = llm.get_tokenizer()
-
-    # Process generated outputs (treating all outputs as lists)
-    all_outputs = []
-    for output in outputs:
-        # Always extract a list of generations
-        prompt_outputs = [out.text for out in output.outputs]
-        all_outputs.append(prompt_outputs)
-
-    # Prepare results: update each valid data item with the generated text.
-    for i in valid_indices:
-        text_list = all_outputs[i]  # always a list
-        (
-            reasons,
-            answers,
-            out_tokens,
-            reason_tokens,
-            answer_tokens,
-            close_think_tokens,
-        ) = [], [], [], [], [], []
-        for text in text_list:
-            reasoning, answer = split_by_think(text, end_think_token)
-            reasons.append(reasoning)
-            answers.append(answer)
-            out_tokens.append(len(tokenizer.encode(text)))
-            reason_tokens.append(len(tokenizer.encode(reasoning)))
-            answer_tokens.append(len(tokenizer.encode(answer)))
-            # Count occurrences of </think> in text
-            think_count = (
-                text.count(end_think_token) if end_think_token is not None else 0
-            )
-            close_think_tokens.append(think_count)
-        data[i]["model_output"] = text_list
-        data[i]["model_reasoning"] = reasons
-        data[i]["model_answer"] = answers
-        # Handle both text and chat format prompts for tokenization
-        if isinstance(outputs[i].prompt, str):
-            data[i]["prompt"] = outputs[i].prompt
-        elif isinstance(outputs[i].prompt, list):
-            data[i]["prompt"] = tokenizer.apply_chat_template(
-                outputs[i].prompt,
-                tokenize=False,
-                add_generation_prompt=False if "cot" in args.prompt_type else True,
-                continue_final_message=True if "cot" in args.prompt_type else False,
-            )
-        data[i]["input_token_length"] = len(tokenizer.encode(data[i]["prompt"]))
-        data[i]["output_token_length"] = out_tokens
-        data[i]["reasoning_token_length"] = reason_tokens
-        data[i]["answer_token_length"] = answer_tokens
-        data[i]["close_think_tokens"] = close_think_tokens
-
-        # Add provider information if available
-        if hasattr(outputs[i], "provider_info"):
-            data[i]["provider_info"] = outputs[i].provider_info
-
-    # Filter data to only include entries with indices in valid_indices
+    # Filter data to only include processed examples
     filtered_data = [data[i] for i in valid_indices]
-
-    # Read the appropriateness matrix for PII leakage calculation
     approp_matrix_path = "approp_matrix.csv"
     print(f"Loading appropriateness matrix from {approp_matrix_path}")
     approp_matrix_df = pd.read_csv(approp_matrix_path, index_col=0)
-
-    # Compute utility, privacy, and PII leakage scores on filtered data
     utility_score = compute_utility_score(filtered_data, args.ref_answer)
     pii_leakage = compute_pii_leakage(filtered_data, approp_matrix_df)
 
-    # Compute average token lengths and think token statistics
     avg_output_length = sum(
         [
             sum(item["output_token_length"]) / len(item["output_token_length"])
@@ -764,74 +401,36 @@ def main():
         else 0
     )
 
-    # Add scores to summary
-    end_time = time.time()
-    time_delta = end_time - og_time
-    time_required = str(timedelta(seconds=int(time_delta)))
-
-    # Collect unique providers if using OpenRouter
-    unique_providers = set()
-    if args.model_provider == "openrouter":
-        for item in filtered_data:
-            if "provider_info" in item:
-                for provider in item["provider_info"]:
-                    unique_providers.add(provider["provider_name"])
-
     summary = {
         "utility_score": utility_score,
         "pii_leakage": pii_leakage,
         "total_examples": len(filtered_data),
         "positive_examples": sum(1 for item in filtered_data if item.get("label") == 1),
         "negative_examples": sum(1 for item in filtered_data if item.get("label") == 0),
-        "time_required": time_required,
+        "time_required": str(timedelta(seconds=int(time.time() - og_time))),
         "avg_output_length": avg_output_length,
         "avg_reasoning_length": avg_reasoning_length,
         "avg_answer_length": avg_answer_length,
         "avg_close_think_tokens": avg_close_think_tokens,
         "max_close_think_tokens": max_close_think_tokens,
-        "rana_enabled": args.rana,
     }
 
-    # Add unique providers to summary if using OpenRouter
-    if args.model_provider == "openrouter":
-        summary["openrouter_model_providers"] = sorted(list(unique_providers))
-        # Add OpenRouter cost to summary
-        total_openrouter_cost = sum(
-            sum(provider["total_cost"] for provider in item["provider_info"])
-            for item in filtered_data
-            if "provider_info" in item
-        )
-        summary["openrouter_total_cost"] = total_openrouter_cost
-
-    # If RAnA is enabled, insert the anonymized reasoning PII leakage scores (set to 0)
-    if args.rana:
-        summary["gpt_reasoning_avg_anonymized"] = 0.0
-        summary["gpt_reasoning_bin_avg_anonymized"] = 0.0
-        summary["gpt_reasoning_std_anonymized"] = 0.0
-        summary["gpt_reasoning_bin_std_anonymized"] = 0.0
-        print("Added anonymized reasoning PII leakage scores (set to 0) for RAnA mode")
-
-    # Add summary and args to data
     result_data = {
         "args": vars(args),
-        "gen_conf": gen_conf,
         "summary": summary,
-        "data": filtered_data,  # Store only the filtered data
+        "data": filtered_data,
     }
 
-    # Make sure the output directory exists
     os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
+    with open(args.output_file, "w") as f:
+        json.dump(result_data, f, indent=2)
 
-    # Prepare to save results, but only save after GPT eval if it's enabled
-    if not args.gpt_eval:
-        # Save results immediately if GPT eval is not enabled
-        with open(args.output_file, "w") as f:
-            json.dump(result_data, f, indent=2)
-
-    print(f"Generated {len(all_outputs)} outputs in {time_required}")
+    print(f"Generated {len(all_outputs)} outputs")
     print(f"Utility score: {utility_score['utility_score_avg']:.4f}")
     print(
-        f"PII leakage (Binarized) - Output: {pii_leakage['output_bin_avg']:.4f}, Reasoning: {pii_leakage['reasoning_bin_avg']:.4f}, Answer: {pii_leakage['answer_bin_avg']:.4f}"
+        f"PII leakage (Binarized) - Output: {pii_leakage['output_bin_avg']:.4f}, "
+        f"Reasoning: {pii_leakage['reasoning_bin_avg']:.4f}, "
+        f"Answer: {pii_leakage['answer_bin_avg']:.4f}"
     )
     print(
         f"Average token lengths - Output: {avg_output_length:.2f}, Reasoning: {avg_reasoning_length:.2f}, Answer: {avg_answer_length:.2f}"
@@ -840,53 +439,21 @@ def main():
         f"Think tokens - Avg: {avg_close_think_tokens:.2f}, Max: {max_close_think_tokens}"
     )
 
-    # Print unique providers if using OpenRouter
-    if args.model_provider == "openrouter":
-        print(f"Unique providers used: {', '.join(sorted(unique_providers))}")
-
-    # If GPT evaluation is enabled, run it
     if args.gpt_eval:
-        # Check if OPENAI_API_KEY is set
         if not os.getenv("OPENAI_API_KEY"):
-            raise ValueError(
-                "OPENAI_API_KEY environment variable is required for GPT evaluation"
-            )
-
+            raise ValueError("OPENAI_API_KEY environment variable is required for GPT evaluation")
         print(f"\nRunning GPT evaluation using {args.gpt_eval_model}...")
-
-        # Extract PII with GPT for all outputs
         all_responses = compute_gpt_extraction_for_all(
             filtered_data,
             model=args.gpt_eval_model,
             prompt_inj=args.prompt_inj is not None,
         )
-
-        # Calculate the total cost of OpenAI API calls
         total_cost = calculate_openai_cost(all_responses)
-
-        # Remove the formatted_situation_prompt from data items to avoid saving it
         for item in filtered_data:
             if "formatted_situation_prompt" in item:
                 del item["formatted_situation_prompt"]
-
-        # Display the cost prominently with rich
-        cost_console = Console()
-
-        # Display the cost
-        cost_panel = Panel(
-            f"[bold white]Total OpenAI API Cost:[/] [bold green]${total_cost:.2f}[/]",
-            title="💰 Cost Summary",
-            border_style="green",
-        )
-        cost_console.print()
-        cost_console.print(cost_panel)
-        cost_console.print()
-
-        # Compute GPT-based utility, privacy, and PII leakage scores
         gpt_utility_score = compute_gpt_utility_score(filtered_data, args.ref_answer)
         gpt_pii_leakage = compute_gpt_pii_leakage(filtered_data, approp_matrix_df)
-
-        # Add GPT-based scores to summary
         summary.update(
             {
                 "gpt_utility_score": gpt_utility_score,
@@ -894,14 +461,9 @@ def main():
                 "total_gpt_api_cost": total_cost,
             }
         )
-
-        # Update result data with GPT-based scores
         result_data["summary"] = summary
-
-        # Save updated results
         with open(args.output_file, "w") as f:
             json.dump(result_data, f, indent=2)
-
         print(f"GPT Utility score: {gpt_utility_score['gpt_utility_score_avg']:.4f}")
         print(
             f"GPT PII leakage (Binarized) - Output: {gpt_pii_leakage['gpt_output_bin_avg']:.4f}, "
@@ -910,7 +472,6 @@ def main():
         )
 
     print(f"Results saved to {args.output_file}")
-
 
 if __name__ == "__main__":
     load_dotenv(dotenv_path=".env")
