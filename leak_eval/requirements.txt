@@ -1,5 +1,4 @@
 transformers>=4.49.0
-vllm==0.8.5.post1
 torch>=2.6.0
 pandas
 numpy
