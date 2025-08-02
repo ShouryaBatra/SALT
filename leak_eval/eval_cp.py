@@ -167,7 +167,7 @@ def prepare_batch_prompts(prompts, tokenizer):
         batch_texts.append(prompt_text)
     return batch_texts
 
-def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_layer_idx=15):
+def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_layer_idx=15):                       #<---  Needs print statements to understand activations shapes
     """Generate a batch of outputs while capturing activations"""
     activations = []
     
@@ -294,12 +294,13 @@ def main():
             print(f"Error: Prompt file {prompt_file} not found")
             return
     if (
-        "deepseek" in args.model.lower()
-        or "qwq" in args.model.lower()
-        or "cot" in args.prompt_type
+    "deepseek" in args.model.lower()
+    or "qwq" in args.model.lower()
+    or "cot" in args.prompt_type
     ):
         start_think_token = "<think>"
         end_think_token = "</think>"
+    
     elif "nemotron" in args.model.lower():
         if "reasoning" in args.prompt_type:
             start_think_token = "<think>"
@@ -307,6 +308,7 @@ def main():
         else:
             start_think_token = None
             end_think_token = None
+    
     elif "s1" in args.model.lower():
         start_think_token = "<|im_start|>think"
         end_think_token = "<|im_start|>answer"
@@ -314,6 +316,7 @@ def main():
             "<think>", "<|im_start|>think"
         ).replace("</think>", "<|im_start|>answer")
         print("Reformatted prompt for s1 models", sys_prompt_template)
+    
     else:
         start_think_token = None
         end_think_token = None
@@ -468,7 +471,7 @@ def main():
         
         # Generate batch with activations
         try:
-            batch_outputs, batch_activations = generate_batch_with_activations(
+            batch_outputs, batch_activations = generate_batch_with_activations(                             #<---  Needs print statements to understand activations shapes
                 model, tokenizer, batch_texts, args, target_layer_idx
             )
             
