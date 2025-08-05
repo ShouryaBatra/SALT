@@ -167,15 +167,28 @@ def prepare_batch_prompts(prompts, tokenizer):
         batch_texts.append(prompt_text)
     return batch_texts
 
-def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_layer_idx=15):                       #<---  Needs print statements to understand activations shapes
+def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_layer_idx=15):
     """Generate a batch of outputs while capturing activations"""
     activations = []
+    activation_count = 0  # DEBUG: Track how many times hook fires
     
     def activation_hook(module, input, output):
+        nonlocal activation_count
+        activation_count += 1
+        
         if isinstance(output, tuple):
             activation = output[0]
         else:
             activation = output
+        
+        # DEBUG: Print activation shapes
+        print(f"[BATCH DEBUG] Hook fired #{activation_count}")
+        print(f"[BATCH DEBUG] Activation shape: {activation.shape}")
+        if len(activation.shape) >= 3:
+            print(f"[BATCH DEBUG] Batch size: {activation.shape[0]}, Seq len: {activation.shape[1]}, Hidden dim: {activation.shape[2]}")
+        else:
+            print(f"[BATCH DEBUG] Unexpected activation shape dimensions: {len(activation.shape)}")
+        
         # Store activation for each item in the batch
         activations.append(activation.detach().cpu())
     
@@ -183,6 +196,8 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
     hook_handle = model.model.layers[target_layer_idx].register_forward_hook(activation_hook)
     
     try:
+        print(f"[BATCH DEBUG] Processing batch with {len(batch_texts)} items")
+        
         # Tokenize batch with padding
         inputs = tokenizer(
             batch_texts, 
@@ -191,6 +206,8 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
             truncation=True,
             max_length=4096  # Reasonable limit
         ).to(model.device)
+        
+        print(f"[BATCH DEBUG] Input shape after tokenization: {inputs['input_ids'].shape}")
         
         # Set up generation parameters
         gen_kwargs = {
@@ -218,6 +235,11 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
         with torch.no_grad():
             output_ids = model.generate(**inputs, **gen_kwargs)
         
+        print(f"[BATCH DEBUG] Output shape after generation: {output_ids.shape}")
+        print(f"[BATCH DEBUG] Total activations captured: {len(activations)}")
+        if activations:
+            print(f"[BATCH DEBUG] Final activation shape: {activations[-1].shape}")
+        
         # Decode outputs
         outputs = []
         for i, ids in enumerate(output_ids):
@@ -237,9 +259,12 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
         if activations:
             # Take the last captured activation (from the generation)
             last_activation = activations[-1]
+            print(f"[BATCH DEBUG] Splitting last activation of shape {last_activation.shape} into {len(batch_texts)} items")
             # Split by batch dimension
             for i in range(len(batch_texts)):
-                batch_activations.append(last_activation[i])
+                item_activation = last_activation[i]
+                print(f"[BATCH DEBUG] Item {i} activation shape: {item_activation.shape}")
+                batch_activations.append(item_activation)
         
         return outputs, batch_activations
         
@@ -471,7 +496,7 @@ def main():
         
         # Generate batch with activations
         try:
-            batch_outputs, batch_activations = generate_batch_with_activations(                             #<---  Needs print statements to understand activations shapes
+            batch_outputs, batch_activations = generate_batch_with_activations(
                 model, tokenizer, batch_texts, args, target_layer_idx
             )
             
@@ -531,18 +556,38 @@ def main():
 
                 # Single item processing with activation
                 activations = []
+                activation_count = 0  # DEBUG: Track hook fires for sequential
+                
                 def activation_hook(module, input, output):
+                    nonlocal activation_count
+                    activation_count += 1
+                    
                     if isinstance(output, tuple):
                         activation = output[0]
                     else:
                         activation = output
+                    
+                    # DEBUG: Print activation shapes for sequential processing
+                    print(f"[SEQUENTIAL DEBUG] Hook fired #{activation_count}")
+                    print(f"[SEQUENTIAL DEBUG] Activation shape: {activation.shape}")
+                    if len(activation.shape) >= 3:
+                        print(f"[SEQUENTIAL DEBUG] Batch size: {activation.shape[0]}, Seq len: {activation.shape[1]}, Hidden dim: {activation.shape[2]}")
+                    else:
+                        print(f"[SEQUENTIAL DEBUG] Unexpected activation shape dimensions: {len(activation.shape)}")
+                    
                     activations.append(activation.detach().cpu())
                 
                 hook_handle = model.model.layers[target_layer_idx].register_forward_hook(activation_hook)
                 try:
+                    print(f"[SEQUENTIAL DEBUG] Processing single item with input shape: {inputs['input_ids'].shape}")
+                    
                     output_ids = model.generate(**inputs, **gen_kwargs)
                     output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
                     all_outputs.append(output_text)
+                    
+                    print(f"[SEQUENTIAL DEBUG] Total activations captured: {len(activations)}")
+                    if activations:
+                        print(f"[SEQUENTIAL DEBUG] Final activation shape: {activations[-1].shape}")
                     
                     data[data_idx]["model_output"] = [output_text]
                     reasoning, answer = split_by_think(output_text, end_think_token)
@@ -557,7 +602,11 @@ def main():
                         data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
                     else:
                         data[data_idx]["close_think_tokens"] = [0]
-                    data[data_idx]["activation"] = activations[-1].tolist()
+                    
+                    final_activation = activations[-1][0] if activations else None  # Remove batch dimension for sequential
+                    if final_activation is not None:
+                        print(f"[SEQUENTIAL DEBUG] Final activation after removing batch dim: {final_activation.shape}")
+                        data[data_idx]["activation"] = final_activation.tolist()
                 finally:
                     hook_handle.remove()
         
