@@ -254,17 +254,52 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
             outputs.append(output_text)
         
         # The hook captures activations for the entire batch
-        # We need to split them by batch items
+        # Reconstruct FULL sequence activations from all captured activations
         batch_activations = []
-        if activations:
-            # Take the last captured activation (from the generation)
-            last_activation = activations[-1]
-            print(f"[BATCH DEBUG] Splitting last activation of shape {last_activation.shape} into {len(batch_texts)} items")
-            # Split by batch dimension
+        if activations and len(activations) >= 2:
+            print(f"[BATCH DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
+            
+            # First activation: input processing [batch_size, input_len, hidden_dim]
+            input_activations = activations[0]
+            print(f"[BATCH DEBUG] Input activations shape: {input_activations.shape}")
+            
+            # Remaining activations: generated tokens [batch_size, 1, hidden_dim] each
+            generated_activations = activations[1:]
+            print(f"[BATCH DEBUG] Generated activations count: {len(generated_activations)}")
+            
+            # Concatenate all generated token activations
+            if generated_activations:
+                generated_tensor = torch.cat(generated_activations, dim=1)  # [batch_size, gen_len, hidden_dim]
+                print(f"[BATCH DEBUG] Generated tensor shape: {generated_tensor.shape}")
+                
+                # Combine input + generated activations
+                full_sequence_activations = torch.cat([input_activations, generated_tensor], dim=1)
+                print(f"[BATCH DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
+            else:
+                full_sequence_activations = input_activations
+                print(f"[BATCH DEBUG] No generated tokens, using input activations only")
+            
+            # Split by batch items to get per-example activation matrices
             for i in range(len(batch_texts)):
-                item_activation = last_activation[i]
-                print(f"[BATCH DEBUG] Item {i} activation shape: {item_activation.shape}")
-                batch_activations.append(item_activation)
+                # Each item gets a 2D matrix: [sequence_length, hidden_dim]
+                item_activation_matrix = full_sequence_activations[i]  # Shape: [seq_len, hidden_dim]
+                print(f"[BATCH DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
+                batch_activations.append(item_activation_matrix)
+        
+        elif activations and len(activations) == 1:
+            # Only input processing, no generation
+            print(f"[BATCH DEBUG] Only input activations captured")
+            input_activations = activations[0]
+            for i in range(len(batch_texts)):
+                item_activation_matrix = input_activations[i]
+                print(f"[BATCH DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
+                batch_activations.append(item_activation_matrix)
+        
+        else:
+            print(f"[BATCH DEBUG] No activations captured")
+            # Return empty activations for each item
+            for i in range(len(batch_texts)):
+                batch_activations.append(torch.empty(0, 3584))
         
         return outputs, batch_activations
         
@@ -523,8 +558,26 @@ def main():
                     data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
                 else:
                     data[data_idx]["close_think_tokens"] = [0]
-                # Save activation
-                data[data_idx]["activation"] = activation.tolist()
+                # Save activation as compressed binary file
+                activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
+                os.makedirs(activations_dir, exist_ok=True)
+                
+                activation_file = f"layer_{target_layer_idx}_example_{data_idx}.npz"
+                activation_path = os.path.join(activations_dir, activation_file)
+                
+                np.savez_compressed(
+                    activation_path,
+                    activation=activation.numpy().astype(np.float32),
+                    layer=target_layer_idx,
+                    example_id=data_idx,
+                    shape=activation.shape
+                )
+                
+                data[data_idx]["activation"] = {
+                    "file": activation_file,
+                    "shape": list(activation.shape),
+                    "dtype": "float32"
+                }
             
         except Exception as e:
             print(f"Error processing batch {current_batch_num}: {e}")
@@ -603,10 +656,90 @@ def main():
                     else:
                         data[data_idx]["close_think_tokens"] = [0]
                     
-                    final_activation = activations[-1][0] if activations else None  # Remove batch dimension for sequential
-                    if final_activation is not None:
-                        print(f"[SEQUENTIAL DEBUG] Final activation after removing batch dim: {final_activation.shape}")
-                        data[data_idx]["activation"] = final_activation.tolist()
+                    # Reconstruct full sequence activations for sequential processing
+                    if activations and len(activations) >= 2:
+                        print(f"[SEQUENTIAL DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
+                        
+                        # First activation: input processing [1, input_len, hidden_dim]
+                        input_activations = activations[0]
+                        print(f"[SEQUENTIAL DEBUG] Input activations shape: {input_activations.shape}")
+                        
+                        # Remaining activations: generated tokens [1, 1, hidden_dim] each
+                        generated_activations = activations[1:]
+                        print(f"[SEQUENTIAL DEBUG] Generated activations count: {len(generated_activations)}")
+                        
+                        # Concatenate all generated token activations
+                        if generated_activations:
+                            generated_tensor = torch.cat(generated_activations, dim=1)  # [1, gen_len, hidden_dim]
+                            print(f"[SEQUENTIAL DEBUG] Generated tensor shape: {generated_tensor.shape}")
+                            
+                            # Combine input + generated activations
+                            full_sequence_activations = torch.cat([input_activations, generated_tensor], dim=1)
+                            print(f"[SEQUENTIAL DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
+                        else:
+                            full_sequence_activations = input_activations
+                            print(f"[SEQUENTIAL DEBUG] No generated tokens, using input activations only")
+                        
+                        # Remove batch dimension for sequential processing [seq_len, hidden_dim]
+                        item_activation_matrix = full_sequence_activations[0]
+                        print(f"[SEQUENTIAL DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
+                        
+                        # Save activation as compressed binary file
+                        activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
+                        os.makedirs(activations_dir, exist_ok=True)
+                        
+                        activation_file = f"layer_{target_layer_idx}_example_{data_idx}.npz"
+                        activation_path = os.path.join(activations_dir, activation_file)
+                        
+                        np.savez_compressed(
+                            activation_path,
+                            activation=item_activation_matrix.numpy().astype(np.float32),
+                            layer=target_layer_idx,
+                            example_id=data_idx,
+                            shape=item_activation_matrix.shape
+                        )
+                        
+                        data[data_idx]["activation"] = {
+                            "file": activation_file,
+                            "shape": list(item_activation_matrix.shape),
+                            "dtype": "float32"
+                        }
+                        
+                    elif activations and len(activations) == 1:
+                        # Only input processing, no generation
+                        print(f"[SEQUENTIAL DEBUG] Only input activations captured")
+                        input_activations = activations[0]
+                        item_activation_matrix = input_activations[0]  # Remove batch dimension
+                        print(f"[SEQUENTIAL DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
+                        
+                        # Save activation as compressed binary file
+                        activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
+                        os.makedirs(activations_dir, exist_ok=True)
+                        
+                        activation_file = f"layer_{target_layer_idx}_example_{data_idx}.npz"
+                        activation_path = os.path.join(activations_dir, activation_file)
+                        
+                        np.savez_compressed(
+                            activation_path,
+                            activation=item_activation_matrix.numpy().astype(np.float32),
+                            layer=target_layer_idx,
+                            example_id=data_idx,
+                            shape=item_activation_matrix.shape
+                        )
+                        
+                        data[data_idx]["activation"] = {
+                            "file": activation_file,
+                            "shape": list(item_activation_matrix.shape),
+                            "dtype": "float32"
+                        }
+                        
+                    else:
+                        print(f"[SEQUENTIAL DEBUG] No activations captured")
+                        data[data_idx]["activation"] = {
+                            "file": None,
+                            "shape": [0, 0],
+                            "dtype": "float32"
+                        }
                 finally:
                     hook_handle.remove()
         
