@@ -567,7 +567,7 @@ def main():
                 
                 np.savez_compressed(
                     activation_path,
-                    activation=activation.numpy().astype(np.float32),
+                    activation=activation.to(torch.float32).cpu().numpy(),
                     layer=target_layer_idx,
                     example_id=data_idx,
                     shape=activation.shape
@@ -693,7 +693,7 @@ def main():
                         
                         np.savez_compressed(
                             activation_path,
-                            activation=item_activation_matrix.numpy().astype(np.float32),
+                            activation=item_activation_matrix.to(torch.float32).cpu().numpy(),
                             layer=target_layer_idx,
                             example_id=data_idx,
                             shape=item_activation_matrix.shape
@@ -721,7 +721,7 @@ def main():
                         
                         np.savez_compressed(
                             activation_path,
-                            activation=item_activation_matrix.numpy().astype(np.float32),
+                            activation=item_activation_matrix.to(torch.float32).cpu().numpy(),
                             layer=target_layer_idx,
                             example_id=data_idx,
                             shape=item_activation_matrix.shape
