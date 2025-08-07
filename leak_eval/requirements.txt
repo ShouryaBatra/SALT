@@ -10,3 +10,4 @@ huggingface_hub
 tenacity
 matplotlib
 sklearn
+accelerate
