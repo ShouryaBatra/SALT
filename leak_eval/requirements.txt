@@ -8,3 +8,4 @@ rich
 openai
 huggingface_hub
 tenacity
+matplotlib
