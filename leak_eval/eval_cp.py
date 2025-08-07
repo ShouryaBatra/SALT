@@ -34,6 +34,114 @@ from generate_utils import (
     get_provider_model_name,
 )
 
+def clean_repeated_input(tokenizer, input_ids, output_ids):
+    """Remove repeated input from output if present"""
+    try:
+        input_text = tokenizer.decode(input_ids, skip_special_tokens=False)
+        output_text = tokenizer.decode(output_ids, skip_special_tokens=False)
+        
+        print(f"[CLEAN DEBUG] Input length: {len(input_ids)} tokens")
+        print(f"[CLEAN DEBUG] Output length: {len(output_ids)} tokens")
+        
+        # Check if output starts with the input
+        if output_text.startswith(input_text):
+            print(f"[CLEAN DEBUG] Detected repeated input - removing it")
+            # Remove the repeated input portion
+            clean_output_text = output_text[len(input_text):].strip()
+            
+            if clean_output_text:
+                clean_output_ids = tokenizer.encode(clean_output_text, add_special_tokens=False)
+                print(f"[CLEAN DEBUG] Cleaned output length: {len(clean_output_ids)} tokens")
+                return torch.tensor(clean_output_ids, device=output_ids.device)
+            else:
+                print(f"[CLEAN DEBUG] Warning: No content after removing repeated input")
+                return torch.tensor([], device=output_ids.device)
+        else:
+            print(f"[CLEAN DEBUG] No repeated input detected")
+            return output_ids
+            
+    except Exception as e:
+        print(f"[CLEAN DEBUG] Error during cleaning: {e}")
+        return output_ids
+
+def find_special_token_indices(tokenizer, token_ids, start_think_token, end_think_token):
+    """Find indices of special tokens in the sequence"""
+    
+    # Convert tokens to text to find positions
+    full_text = tokenizer.decode(token_ids, skip_special_tokens=False)
+    
+    indices = {
+        "think_start_idx": None,
+        "think_end_idx": None, 
+        "answer_start_idx": None,
+        "sequence_length": len(token_ids)
+    }
+    
+    if start_think_token and end_think_token:
+        # Tokenize the special tokens to get their token IDs
+        start_think_ids = tokenizer.encode(start_think_token, add_special_tokens=False)
+        end_think_ids = tokenizer.encode(end_think_token, add_special_tokens=False)
+        
+        # Find first occurrence of start think token
+        for i in range(len(token_ids) - len(start_think_ids) + 1):
+            if token_ids[i:i+len(start_think_ids)].tolist() == start_think_ids:
+                indices["think_start_idx"] = i
+                break
+        
+        # Find last occurrence of end think token  
+        for i in range(len(token_ids) - len(end_think_ids), -1, -1):
+            if i >= 0 and token_ids[i:i+len(end_think_ids)].tolist() == end_think_ids:
+                indices["think_end_idx"] = i + len(end_think_ids) - 1  # Last token of end tag
+                indices["answer_start_idx"] = i + len(end_think_ids)     # First token after end tag
+                break
+    
+    return indices
+
+def compute_activation_averages(activation_matrix, token_indices):
+    """Compute averaged activations for different segments"""
+    
+    averages = {}
+    seq_len, hidden_dim = activation_matrix.shape
+    
+    # Full sequence average
+    averages["full_avg_activation"] = np.mean(activation_matrix, axis=0)  # [hidden_dim]
+    
+    # Reasoning average (think start to think end)
+    if (token_indices["think_start_idx"] is not None and 
+        token_indices["think_end_idx"] is not None):
+        
+        start_idx = token_indices["think_start_idx"]
+        end_idx = min(token_indices["think_end_idx"] + 1, seq_len)  # +1 for inclusive
+        
+        if start_idx < end_idx:
+            reasoning_activations = activation_matrix[start_idx:end_idx]
+            averages["reasoning_avg_activation"] = np.mean(reasoning_activations, axis=0)
+            averages["reasoning_length"] = end_idx - start_idx
+        else:
+            averages["reasoning_avg_activation"] = np.zeros(hidden_dim)
+            averages["reasoning_length"] = 0
+    else:
+        averages["reasoning_avg_activation"] = np.zeros(hidden_dim)
+        averages["reasoning_length"] = 0
+    
+    # Answer average (after think end to sequence end)
+    if token_indices["answer_start_idx"] is not None:
+        start_idx = token_indices["answer_start_idx"]
+        end_idx = seq_len
+        
+        if start_idx < end_idx:
+            answer_activations = activation_matrix[start_idx:end_idx]
+            averages["answer_avg_activation"] = np.mean(answer_activations, axis=0)
+            averages["answer_length"] = end_idx - start_idx
+        else:
+            averages["answer_avg_activation"] = np.zeros(hidden_dim)
+            averages["answer_length"] = 0
+    else:
+        averages["answer_avg_activation"] = np.zeros(hidden_dim)
+        averages["answer_length"] = 0
+    
+    return averages
+
 API_ONLY_MODELS = {
     "deepseek-ai/deepseek-r1",
     "deepseek-ai/deepseek-v3",
@@ -240,8 +348,9 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
         if activations:
             print(f"[BATCH DEBUG] Final activation shape: {activations[-1].shape}")
         
-        # Decode outputs
+        # Decode outputs and clean repeated input
         outputs = []
+        cleaned_complete_sequences = []
         for i, ids in enumerate(output_ids):
             # Remove input tokens to get only generated text
             input_length = len(inputs['input_ids'][i])
@@ -250,7 +359,16 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
             actual_input_length = (input_tokens != tokenizer.pad_token_id).sum().item()
             
             generated_ids = ids[actual_input_length:]
-            output_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            
+            # Clean the generated output to remove any repeated input
+            clean_generated_ids = clean_repeated_input(tokenizer, input_tokens[:actual_input_length], generated_ids)
+            
+            # Store the cleaned complete sequence for activation analysis
+            clean_complete_seq = torch.cat([input_tokens[:actual_input_length], clean_generated_ids], dim=0)
+            cleaned_complete_sequences.append(clean_complete_seq)
+            
+            # Decode the cleaned output
+            output_text = tokenizer.decode(clean_generated_ids, skip_special_tokens=True)
             outputs.append(output_text)
         
         # The hook captures activations for the entire batch
@@ -301,6 +419,8 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
             for i in range(len(batch_texts)):
                 batch_activations.append(torch.empty(0, 3584))
         
+        # Store cleaned sequences for token indexing
+        generate_batch_with_activations.cleaned_sequences = cleaned_complete_sequences
         return outputs, batch_activations
         
     finally:
@@ -558,6 +678,22 @@ def main():
                     data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
                 else:
                     data[data_idx]["close_think_tokens"] = [0]
+                # Find token indices for think tags and answer using cleaned sequence
+                # We need to get the cleaned sequence from the batch processing
+                if hasattr(generate_batch_with_activations, 'cleaned_sequences'):
+                    clean_sequence = generate_batch_with_activations.cleaned_sequences[i]
+                else:
+                    # Fallback: reconstruct clean sequence 
+                    prompt_tokens = tokenizer.encode(prompt_text, add_special_tokens=False)
+                    output_tokens = tokenizer.encode(output_text, add_special_tokens=False)
+                    clean_sequence = torch.tensor(prompt_tokens + output_tokens)
+                
+                token_indices = find_special_token_indices(tokenizer, clean_sequence, start_think_token, end_think_token)
+                
+                # Compute activation averages for different segments
+                activation_np = activation.to(torch.float32).cpu().numpy()
+                averages = compute_activation_averages(activation_np, token_indices)
+                
                 # Save activation as compressed binary file
                 activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
                 os.makedirs(activations_dir, exist_ok=True)
@@ -567,16 +703,19 @@ def main():
                 
                 np.savez_compressed(
                     activation_path,
-                    activation=activation.to(torch.float32).cpu().numpy(),
+                    activation=activation_np,
                     layer=target_layer_idx,
                     example_id=data_idx,
-                    shape=activation.shape
+                    shape=activation.shape,
+                    **averages  # Include averaged representations
                 )
                 
                 data[data_idx]["activation"] = {
                     "file": activation_file,
                     "shape": list(activation.shape),
-                    "dtype": "float32"
+                    "dtype": "float32",
+                    "token_indices": token_indices,
+                    "averages": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in averages.items() if not k.endswith('_activation')}
                 }
             
         except Exception as e:
@@ -635,7 +774,17 @@ def main():
                     print(f"[SEQUENTIAL DEBUG] Processing single item with input shape: {inputs['input_ids'].shape}")
                     
                     output_ids = model.generate(**inputs, **gen_kwargs)
-                    output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+                    
+                    # Clean the output to remove any repeated input
+                    input_tokens = inputs['input_ids'][0]
+                    actual_input_length = (input_tokens != tokenizer.pad_token_id).sum().item()
+                    generated_ids = output_ids[0][actual_input_length:]
+                    clean_generated_ids = clean_repeated_input(tokenizer, input_tokens[:actual_input_length], generated_ids)
+                    
+                    # Create cleaned complete sequence for token indexing
+                    clean_complete_seq = torch.cat([input_tokens[:actual_input_length], clean_generated_ids], dim=0)
+                    
+                    output_text = tokenizer.decode(clean_generated_ids, skip_special_tokens=True)
                     all_outputs.append(output_text)
                     
                     print(f"[SEQUENTIAL DEBUG] Total activations captured: {len(activations)}")
@@ -684,6 +833,13 @@ def main():
                         item_activation_matrix = full_sequence_activations[0]
                         print(f"[SEQUENTIAL DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
                         
+                        # Find token indices for think tags and answer using cleaned sequence
+                        token_indices = find_special_token_indices(tokenizer, clean_complete_seq, start_think_token, end_think_token)
+                        
+                        # Compute activation averages for different segments
+                        activation_np = item_activation_matrix.to(torch.float32).cpu().numpy()
+                        averages = compute_activation_averages(activation_np, token_indices)
+                        
                         # Save activation as compressed binary file
                         activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
                         os.makedirs(activations_dir, exist_ok=True)
@@ -693,16 +849,19 @@ def main():
                         
                         np.savez_compressed(
                             activation_path,
-                            activation=item_activation_matrix.to(torch.float32).cpu().numpy(),
+                            activation=activation_np,
                             layer=target_layer_idx,
                             example_id=data_idx,
-                            shape=item_activation_matrix.shape
+                            shape=item_activation_matrix.shape,
+                            **averages  # Include averaged representations
                         )
                         
                         data[data_idx]["activation"] = {
                             "file": activation_file,
                             "shape": list(item_activation_matrix.shape),
-                            "dtype": "float32"
+                            "dtype": "float32",
+                            "token_indices": token_indices,
+                            "averages": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in averages.items() if not k.endswith('_activation')}
                         }
                         
                     elif activations and len(activations) == 1:
@@ -712,6 +871,13 @@ def main():
                         item_activation_matrix = input_activations[0]  # Remove batch dimension
                         print(f"[SEQUENTIAL DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
                         
+                        # Find token indices for think tags and answer (input only case) using cleaned sequence
+                        token_indices = find_special_token_indices(tokenizer, clean_complete_seq, start_think_token, end_think_token)
+                        
+                        # Compute activation averages for different segments
+                        activation_np = item_activation_matrix.to(torch.float32).cpu().numpy()
+                        averages = compute_activation_averages(activation_np, token_indices)
+                        
                         # Save activation as compressed binary file
                         activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
                         os.makedirs(activations_dir, exist_ok=True)
@@ -721,16 +887,19 @@ def main():
                         
                         np.savez_compressed(
                             activation_path,
-                            activation=item_activation_matrix.to(torch.float32).cpu().numpy(),
+                            activation=activation_np,
                             layer=target_layer_idx,
                             example_id=data_idx,
-                            shape=item_activation_matrix.shape
+                            shape=item_activation_matrix.shape,
+                            **averages  # Include averaged representations
                         )
                         
                         data[data_idx]["activation"] = {
                             "file": activation_file,
                             "shape": list(item_activation_matrix.shape),
-                            "dtype": "float32"
+                            "dtype": "float32",
+                            "token_indices": token_indices,
+                            "averages": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in averages.items() if not k.endswith('_activation')}
                         }
                         
                     else:
