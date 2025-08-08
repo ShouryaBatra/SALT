@@ -9,5 +9,5 @@ openai
 huggingface_hub
 tenacity
 matplotlib
-sklearn
+scikit-learn
 accelerate
