@@ -235,7 +235,31 @@ def parse_args():
         default="openrouter_settings/default_settings.json",
         help="Path to OpenRouter settings JSON file",
     )
+    # NEW ARGUMENTS FOR MULTI-LAYER EVALUATION
+    parser.add_argument(
+        "--layers",
+        type=str,
+        default="all",
+        help="Layers to extract activations from. Options: 'all', 'range:start-end', or comma-separated list like '0,15,31,63'",
+    )
+    parser.add_argument(
+        "--layer_step",
+        type=int,
+        default=1,
+        help="Step size when using 'all' layers (e.g., 4 would extract every 4th layer)",
+    )
     return parser.parse_args()
+
+def parse_layer_specification(layers_arg, num_layers, layer_step=1):
+    """Parse the layers argument to determine which layers to extract"""
+    if layers_arg == "all":
+        return list(range(0, num_layers, layer_step))
+    elif layers_arg.startswith("range:"):
+        range_part = layers_arg.split(":", 1)[1]
+        start, end = map(int, range_part.split("-"))
+        return list(range(start, min(end + 1, num_layers), layer_step))
+    else:
+        return [int(x.strip()) for x in layers_arg.split(",")]
 
 def load_data(input_file: str) -> List[Dict]:
     with open(input_file, "r") as f:
@@ -275,36 +299,39 @@ def prepare_batch_prompts(prompts, tokenizer):
         batch_texts.append(prompt_text)
     return batch_texts
 
-def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_layer_idx=15):
-    """Generate a batch of outputs while capturing activations"""
-    activations = []
-    activation_count = 0  # DEBUG: Track how many times hook fires
+def generate_batch_with_multilayer_activations(model, tokenizer, batch_texts, args, target_layers):
+    """Generate a batch of outputs while capturing activations from multiple layers"""
+    layer_activations = {layer_idx: [] for layer_idx in target_layers}
+    activation_counts = {layer_idx: 0 for layer_idx in target_layers}
     
-    def activation_hook(module, input, output):
-        nonlocal activation_count
-        activation_count += 1
+    def create_activation_hook(layer_idx):
+        def activation_hook(module, input, output):
+            nonlocal activation_counts
+            activation_counts[layer_idx] += 1
+            
+            if isinstance(output, tuple):
+                activation = output[0]
+            else:
+                activation = output
+            
+            # DEBUG: Print activation shapes
+            print(f"[LAYER {layer_idx} DEBUG] Hook fired #{activation_counts[layer_idx]}")
+            print(f"[LAYER {layer_idx} DEBUG] Activation shape: {activation.shape}")
+            
+            # Store activation for this layer
+            layer_activations[layer_idx].append(activation.detach().cpu())
         
-        if isinstance(output, tuple):
-            activation = output[0]
-        else:
-            activation = output
-        
-        # DEBUG: Print activation shapes
-        print(f"[BATCH DEBUG] Hook fired #{activation_count}")
-        print(f"[BATCH DEBUG] Activation shape: {activation.shape}")
-        if len(activation.shape) >= 3:
-            print(f"[BATCH DEBUG] Batch size: {activation.shape[0]}, Seq len: {activation.shape[1]}, Hidden dim: {activation.shape[2]}")
-        else:
-            print(f"[BATCH DEBUG] Unexpected activation shape dimensions: {len(activation.shape)}")
-        
-        # Store activation for each item in the batch
-        activations.append(activation.detach().cpu())
+        return activation_hook
     
-    # Set up activation hook
-    hook_handle = model.model.layers[target_layer_idx].register_forward_hook(activation_hook)
+    # Set up activation hooks for all target layers
+    hook_handles = []
+    for layer_idx in target_layers:
+        hook = create_activation_hook(layer_idx)
+        handle = model.model.layers[layer_idx].register_forward_hook(hook)
+        hook_handles.append(handle)
     
     try:
-        print(f"[BATCH DEBUG] Processing batch with {len(batch_texts)} items")
+        print(f"[MULTILAYER DEBUG] Processing batch with {len(batch_texts)} items for layers {target_layers}")
         
         # Tokenize batch with padding
         inputs = tokenizer(
@@ -315,7 +342,7 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
             max_length=4096  # Reasonable limit
         ).to(model.device)
         
-        print(f"[BATCH DEBUG] Input shape after tokenization: {inputs['input_ids'].shape}")
+        print(f"[MULTILAYER DEBUG] Input shape after tokenization: {inputs['input_ids'].shape}")
         
         # Set up generation parameters
         gen_kwargs = {
@@ -343,10 +370,7 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
         with torch.no_grad():
             output_ids = model.generate(**inputs, **gen_kwargs)
         
-        print(f"[BATCH DEBUG] Output shape after generation: {output_ids.shape}")
-        print(f"[BATCH DEBUG] Total activations captured: {len(activations)}")
-        if activations:
-            print(f"[BATCH DEBUG] Final activation shape: {activations[-1].shape}")
+        print(f"[MULTILAYER DEBUG] Output shape after generation: {output_ids.shape}")
         
         # Decode outputs and clean repeated input
         outputs = []
@@ -371,60 +395,67 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
             output_text = tokenizer.decode(clean_generated_ids, skip_special_tokens=True)
             outputs.append(output_text)
         
-        # The hook captures activations for the entire batch
-        # Reconstruct FULL sequence activations from all captured activations
-        batch_activations = []
-        if activations and len(activations) >= 2:
-            print(f"[BATCH DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
+        # Process activations for each layer
+        batch_layer_activations = {}
+        for layer_idx in target_layers:
+            activations = layer_activations[layer_idx]
+            print(f"[LAYER {layer_idx} DEBUG] Total activations captured: {len(activations)}")
             
-            # First activation: input processing [batch_size, input_len, hidden_dim]
-            input_activations = activations[0]
-            print(f"[BATCH DEBUG] Input activations shape: {input_activations.shape}")
-            
-            # Remaining activations: generated tokens [batch_size, 1, hidden_dim] each
-            generated_activations = activations[1:]
-            print(f"[BATCH DEBUG] Generated activations count: {len(generated_activations)}")
-            
-            # Concatenate all generated token activations
-            if generated_activations:
-                generated_tensor = torch.cat(generated_activations, dim=1)  # [batch_size, gen_len, hidden_dim]
-                print(f"[BATCH DEBUG] Generated tensor shape: {generated_tensor.shape}")
+            batch_activations = []
+            if activations and len(activations) >= 2:
+                print(f"[LAYER {layer_idx} DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
                 
-                # Combine input + generated activations
-                full_sequence_activations = torch.cat([input_activations, generated_tensor], dim=1)
-                print(f"[BATCH DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
-            else:
-                full_sequence_activations = input_activations
-                print(f"[BATCH DEBUG] No generated tokens, using input activations only")
+                # First activation: input processing [batch_size, input_len, hidden_dim]
+                input_activations = activations[0]
+                print(f"[LAYER {layer_idx} DEBUG] Input activations shape: {input_activations.shape}")
+                
+                # Remaining activations: generated tokens [batch_size, 1, hidden_dim] each
+                generated_activations = activations[1:]
+                print(f"[LAYER {layer_idx} DEBUG] Generated activations count: {len(generated_activations)}")
+                
+                # Concatenate all generated token activations
+                if generated_activations:
+                    generated_tensor = torch.cat(generated_activations, dim=1)  # [batch_size, gen_len, hidden_dim]
+                    print(f"[LAYER {layer_idx} DEBUG] Generated tensor shape: {generated_tensor.shape}")
+                    
+                    # Combine input + generated activations
+                    full_sequence_activations = torch.cat([input_activations, generated_tensor], dim=1)
+                    print(f"[LAYER {layer_idx} DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
+                else:
+                    full_sequence_activations = input_activations
+                    print(f"[LAYER {layer_idx} DEBUG] No generated tokens, using input activations only")
+                
+                # Split by batch items to get per-example activation matrices
+                for i in range(len(batch_texts)):
+                    # Each item gets a 2D matrix: [sequence_length, hidden_dim]
+                    item_activation_matrix = full_sequence_activations[i]  # Shape: [seq_len, hidden_dim]
+                    print(f"[LAYER {layer_idx} DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
+                    batch_activations.append(item_activation_matrix)
             
-            # Split by batch items to get per-example activation matrices
-            for i in range(len(batch_texts)):
-                # Each item gets a 2D matrix: [sequence_length, hidden_dim]
-                item_activation_matrix = full_sequence_activations[i]  # Shape: [seq_len, hidden_dim]
-                print(f"[BATCH DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
-                batch_activations.append(item_activation_matrix)
-        
-        elif activations and len(activations) == 1:
-            # Only input processing, no generation
-            print(f"[BATCH DEBUG] Only input activations captured")
-            input_activations = activations[0]
-            for i in range(len(batch_texts)):
-                item_activation_matrix = input_activations[i]
-                print(f"[BATCH DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
-                batch_activations.append(item_activation_matrix)
-        
-        else:
-            print(f"[BATCH DEBUG] No activations captured")
-            # Return empty activations for each item
-            for i in range(len(batch_texts)):
-                batch_activations.append(torch.empty(0, 3584))
+            elif activations and len(activations) == 1:
+                # Only input processing, no generation
+                print(f"[LAYER {layer_idx} DEBUG] Only input activations captured")
+                input_activations = activations[0]
+                for i in range(len(batch_texts)):
+                    item_activation_matrix = input_activations[i]
+                    print(f"[LAYER {layer_idx} DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
+                    batch_activations.append(item_activation_matrix)
+            
+            else:
+                print(f"[LAYER {layer_idx} DEBUG] No activations captured")
+                # Return empty activations for each item
+                for i in range(len(batch_texts)):
+                    batch_activations.append(torch.empty(0, 3584))
+            
+            batch_layer_activations[layer_idx] = batch_activations
         
         # Store cleaned sequences for token indexing
-        generate_batch_with_activations.cleaned_sequences = cleaned_complete_sequences
-        return outputs, batch_activations
+        generate_batch_with_multilayer_activations.cleaned_sequences = cleaned_complete_sequences
+        return outputs, batch_layer_activations
         
     finally:
-        hook_handle.remove()
+        for handle in hook_handles:
+            handle.remove()
 
 def check_memory_usage():
     """Check current GPU memory usage"""
@@ -618,6 +649,12 @@ def main():
     )
     model.eval()
 
+    # Determine which layers to extract from
+    num_layers = len(model.model.layers)
+    print(f"Model has {num_layers} layers")
+    target_layers = parse_layer_specification(args.layers, num_layers, args.layer_step)
+    print(f"Extracting activations from layers: {target_layers}")
+
     # Determine batch size
     if args.batch_size is None:
         args.batch_size = get_optimal_batch_size()
@@ -629,10 +666,8 @@ def main():
     usage_ratio, memory_used, memory_total = check_memory_usage()
     print(f"Initial GPU memory usage: {memory_used:.1f}/{memory_total:.1f} GB ({usage_ratio:.1%})")
 
-    # ---- Batch Processing with Activation Extraction ------
-    target_layer_idx = 15  # 16th block, adjust as desired
+    # ---- Multi-Layer Batch Processing with Activation Extraction ------
     all_outputs = []
-    all_activations = []
     
     # Process prompts in batches
     total_batches = (len(prompts) + args.batch_size - 1) // args.batch_size
@@ -649,17 +684,16 @@ def main():
         # Prepare batch texts
         batch_texts = prepare_batch_prompts(batch_prompts, tokenizer)
         
-        # Generate batch with activations
+        # Generate batch with multi-layer activations
         try:
-            batch_outputs, batch_activations = generate_batch_with_activations(
-                model, tokenizer, batch_texts, args, target_layer_idx
+            batch_outputs, batch_layer_activations = generate_batch_with_multilayer_activations(
+                model, tokenizer, batch_texts, args, target_layers
             )
             
             all_outputs.extend(batch_outputs)
-            all_activations.extend(batch_activations)
             
             # Update data for this batch
-            for i, (output_text, activation) in enumerate(zip(batch_outputs, batch_activations)):
+            for i, output_text in enumerate(batch_outputs):
                 idx_in_batch = batch_idx + i
                 data_idx = valid_indices[idx_in_batch]
                 prompt_text = batch_texts[i]
@@ -678,10 +712,10 @@ def main():
                     data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
                 else:
                     data[data_idx]["close_think_tokens"] = [0]
-                # Find token indices for think tags and answer using cleaned sequence
-                # We need to get the cleaned sequence from the batch processing
-                if hasattr(generate_batch_with_activations, 'cleaned_sequences'):
-                    clean_sequence = generate_batch_with_activations.cleaned_sequences[i]
+
+                # Get cleaned sequence for token indexing
+                if hasattr(generate_batch_with_multilayer_activations, 'cleaned_sequences'):
+                    clean_sequence = generate_batch_with_multilayer_activations.cleaned_sequences[i]
                 else:
                     # Fallback: reconstruct clean sequence 
                     prompt_tokens = tokenizer.encode(prompt_text, add_special_tokens=False)
@@ -690,38 +724,45 @@ def main():
                 
                 token_indices = find_special_token_indices(tokenizer, clean_sequence, start_think_token, end_think_token)
                 
-                # Compute activation averages for different segments
-                activation_np = activation.to(torch.float32).cpu().numpy()
-                averages = compute_activation_averages(activation_np, token_indices)
+                # Process activations for each layer
+                data[data_idx]["activations"] = {}
                 
-                # Save activation as compressed binary file
-                activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
-                os.makedirs(activations_dir, exist_ok=True)
-                
-                activation_file = f"layer_{target_layer_idx}_example_{data_idx}.npz"
-                activation_path = os.path.join(activations_dir, activation_file)
-                
-                np.savez_compressed(
-                    activation_path,
-                    activation=activation_np,
-                    layer=target_layer_idx,
-                    example_id=data_idx,
-                    shape=activation.shape,
-                    **averages  # Include averaged representations
-                )
-                
-                data[data_idx]["activation"] = {
-                    "file": activation_file,
-                    "shape": list(activation.shape),
-                    "dtype": "float32",
-                    "token_indices": token_indices,
-                    "averages": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in averages.items() if not k.endswith('_activation')}
-                }
+                for layer_idx in target_layers:
+                    activation = batch_layer_activations[layer_idx][i]
+                    
+                    # Compute activation averages for different segments
+                    activation_np = activation.to(torch.float32).cpu().numpy()
+                    averages = compute_activation_averages(activation_np, token_indices)
+                    
+                    # Save activation as compressed binary file
+                    activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
+                    os.makedirs(activations_dir, exist_ok=True)
+                    
+                    activation_file = f"layer_{layer_idx}_example_{data_idx}.npz"
+                    activation_path = os.path.join(activations_dir, activation_file)
+                    
+                    np.savez_compressed(
+                        activation_path,
+                        activation=activation_np,
+                        layer=layer_idx,
+                        example_id=data_idx,
+                        shape=activation.shape,
+                        **averages  # Include averaged representations
+                    )
+                    
+                    data[data_idx]["activations"][f"layer_{layer_idx}"] = {
+                        "file": activation_file,
+                        "shape": list(activation.shape),
+                        "dtype": "float32",
+                        "token_indices": token_indices,
+                        "averages": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in averages.items() if not k.endswith('_activation')}
+                    }
             
         except Exception as e:
             print(f"Error processing batch {current_batch_num}: {e}")
-            # Fall back to sequential processing for this batch
             print("Falling back to sequential processing for this batch...")
+            
+            # Sequential processing fallback for this batch
             for i, prompt in enumerate(batch_prompts):
                 idx_in_batch = batch_idx + i
                 data_idx = valid_indices[idx_in_batch]
@@ -746,33 +787,35 @@ def main():
                 if args.repetition_penalty is not None:
                     gen_kwargs["repetition_penalty"] = args.repetition_penalty
 
-                # Single item processing with activation
-                activations = []
-                activation_count = 0  # DEBUG: Track hook fires for sequential
+                # Sequential processing with multi-layer activations
+                layer_activations = {layer_idx: [] for layer_idx in target_layers}
+                activation_counts = {layer_idx: 0 for layer_idx in target_layers}
                 
-                def activation_hook(module, input, output):
-                    nonlocal activation_count
-                    activation_count += 1
+                def create_sequential_hook(layer_idx):
+                    def activation_hook(module, input, output):
+                        nonlocal activation_counts
+                        activation_counts[layer_idx] += 1
+                        
+                        if isinstance(output, tuple):
+                            activation = output[0]
+                        else:
+                            activation = output
+                        
+                        print(f"[SEQ LAYER {layer_idx} DEBUG] Hook fired #{activation_counts[layer_idx]}")
+                        print(f"[SEQ LAYER {layer_idx} DEBUG] Activation shape: {activation.shape}")
+                        
+                        layer_activations[layer_idx].append(activation.detach().cpu())
                     
-                    if isinstance(output, tuple):
-                        activation = output[0]
-                    else:
-                        activation = output
-                    
-                    # DEBUG: Print activation shapes for sequential processing
-                    print(f"[SEQUENTIAL DEBUG] Hook fired #{activation_count}")
-                    print(f"[SEQUENTIAL DEBUG] Activation shape: {activation.shape}")
-                    if len(activation.shape) >= 3:
-                        print(f"[SEQUENTIAL DEBUG] Batch size: {activation.shape[0]}, Seq len: {activation.shape[1]}, Hidden dim: {activation.shape[2]}")
-                    else:
-                        print(f"[SEQUENTIAL DEBUG] Unexpected activation shape dimensions: {len(activation.shape)}")
-                    
-                    activations.append(activation.detach().cpu())
+                    return activation_hook
                 
-                hook_handle = model.model.layers[target_layer_idx].register_forward_hook(activation_hook)
+                # Set up hooks for all target layers
+                hook_handles = []
+                for layer_idx in target_layers:
+                    hook = create_sequential_hook(layer_idx)
+                    handle = model.model.layers[layer_idx].register_forward_hook(hook)
+                    hook_handles.append(handle)
+                
                 try:
-                    print(f"[SEQUENTIAL DEBUG] Processing single item with input shape: {inputs['input_ids'].shape}")
-                    
                     output_ids = model.generate(**inputs, **gen_kwargs)
                     
                     # Clean the output to remove any repeated input
@@ -786,10 +829,6 @@ def main():
                     
                     output_text = tokenizer.decode(clean_generated_ids, skip_special_tokens=True)
                     all_outputs.append(output_text)
-                    
-                    print(f"[SEQUENTIAL DEBUG] Total activations captured: {len(activations)}")
-                    if activations:
-                        print(f"[SEQUENTIAL DEBUG] Final activation shape: {activations[-1].shape}")
                     
                     data[data_idx]["model_output"] = [output_text]
                     reasoning, answer = split_by_think(output_text, end_think_token)
@@ -805,112 +844,91 @@ def main():
                     else:
                         data[data_idx]["close_think_tokens"] = [0]
                     
-                    # Reconstruct full sequence activations for sequential processing
-                    if activations and len(activations) >= 2:
-                        print(f"[SEQUENTIAL DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
+                    token_indices = find_special_token_indices(tokenizer, clean_complete_seq, start_think_token, end_think_token)
+                    
+                    # Process activations for each layer
+                    data[data_idx]["activations"] = {}
+                    
+                    for layer_idx in target_layers:
+                        activations = layer_activations[layer_idx]
+                        print(f"[SEQ LAYER {layer_idx} DEBUG] Total activations captured: {len(activations)}")
                         
-                        # First activation: input processing [1, input_len, hidden_dim]
-                        input_activations = activations[0]
-                        print(f"[SEQUENTIAL DEBUG] Input activations shape: {input_activations.shape}")
-                        
-                        # Remaining activations: generated tokens [1, 1, hidden_dim] each
-                        generated_activations = activations[1:]
-                        print(f"[SEQUENTIAL DEBUG] Generated activations count: {len(generated_activations)}")
-                        
-                        # Concatenate all generated token activations
-                        if generated_activations:
-                            generated_tensor = torch.cat(generated_activations, dim=1)  # [1, gen_len, hidden_dim]
-                            print(f"[SEQUENTIAL DEBUG] Generated tensor shape: {generated_tensor.shape}")
+                        if activations and len(activations) >= 2:
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
                             
-                            # Combine input + generated activations
-                            full_sequence_activations = torch.cat([input_activations, generated_tensor], dim=1)
-                            print(f"[SEQUENTIAL DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
+                            # First activation: input processing [1, input_len, hidden_dim]
+                            input_activations = activations[0]
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] Input activations shape: {input_activations.shape}")
+                            
+                            # Remaining activations: generated tokens [1, 1, hidden_dim] each
+                            generated_activations = activations[1:]
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] Generated activations count: {len(generated_activations)}")
+                            
+                            # Concatenate all generated token activations
+                            if generated_activations:
+                                generated_tensor = torch.cat(generated_activations, dim=1)  # [1, gen_len, hidden_dim]
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] Generated tensor shape: {generated_tensor.shape}")
+                                
+                                # Combine input + generated activations
+                                full_sequence_activations = torch.cat([input_activations, generated_tensor], dim=1)
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
+                            else:
+                                full_sequence_activations = input_activations
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] No generated tokens, using input activations only")
+                            
+                            # Remove batch dimension for sequential processing [seq_len, hidden_dim]
+                            item_activation_matrix = full_sequence_activations[0]
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
+                            
+                        elif activations and len(activations) == 1:
+                            # Only input processing, no generation
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] Only input activations captured")
+                            input_activations = activations[0]
+                            item_activation_matrix = input_activations[0]  # Remove batch dimension
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
+                            
                         else:
-                            full_sequence_activations = input_activations
-                            print(f"[SEQUENTIAL DEBUG] No generated tokens, using input activations only")
-                        
-                        # Remove batch dimension for sequential processing [seq_len, hidden_dim]
-                        item_activation_matrix = full_sequence_activations[0]
-                        print(f"[SEQUENTIAL DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
-                        
-                        # Find token indices for think tags and answer using cleaned sequence
-                        token_indices = find_special_token_indices(tokenizer, clean_complete_seq, start_think_token, end_think_token)
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] No activations captured")
+                            item_activation_matrix = torch.empty(0, 3584)
                         
                         # Compute activation averages for different segments
-                        activation_np = item_activation_matrix.to(torch.float32).cpu().numpy()
-                        averages = compute_activation_averages(activation_np, token_indices)
-                        
-                        # Save activation as compressed binary file
-                        activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
-                        os.makedirs(activations_dir, exist_ok=True)
-                        
-                        activation_file = f"layer_{target_layer_idx}_example_{data_idx}.npz"
-                        activation_path = os.path.join(activations_dir, activation_file)
-                        
-                        np.savez_compressed(
-                            activation_path,
-                            activation=activation_np,
-                            layer=target_layer_idx,
-                            example_id=data_idx,
-                            shape=item_activation_matrix.shape,
-                            **averages  # Include averaged representations
-                        )
-                        
-                        data[data_idx]["activation"] = {
-                            "file": activation_file,
-                            "shape": list(item_activation_matrix.shape),
-                            "dtype": "float32",
-                            "token_indices": token_indices,
-                            "averages": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in averages.items() if not k.endswith('_activation')}
-                        }
-                        
-                    elif activations and len(activations) == 1:
-                        # Only input processing, no generation
-                        print(f"[SEQUENTIAL DEBUG] Only input activations captured")
-                        input_activations = activations[0]
-                        item_activation_matrix = input_activations[0]  # Remove batch dimension
-                        print(f"[SEQUENTIAL DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
-                        
-                        # Find token indices for think tags and answer (input only case) using cleaned sequence
-                        token_indices = find_special_token_indices(tokenizer, clean_complete_seq, start_think_token, end_think_token)
-                        
-                        # Compute activation averages for different segments
-                        activation_np = item_activation_matrix.to(torch.float32).cpu().numpy()
-                        averages = compute_activation_averages(activation_np, token_indices)
-                        
-                        # Save activation as compressed binary file
-                        activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
-                        os.makedirs(activations_dir, exist_ok=True)
-                        
-                        activation_file = f"layer_{target_layer_idx}_example_{data_idx}.npz"
-                        activation_path = os.path.join(activations_dir, activation_file)
-                        
-                        np.savez_compressed(
-                            activation_path,
-                            activation=activation_np,
-                            layer=target_layer_idx,
-                            example_id=data_idx,
-                            shape=item_activation_matrix.shape,
-                            **averages  # Include averaged representations
-                        )
-                        
-                        data[data_idx]["activation"] = {
-                            "file": activation_file,
-                            "shape": list(item_activation_matrix.shape),
-                            "dtype": "float32",
-                            "token_indices": token_indices,
-                            "averages": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in averages.items() if not k.endswith('_activation')}
-                        }
-                        
-                    else:
-                        print(f"[SEQUENTIAL DEBUG] No activations captured")
-                        data[data_idx]["activation"] = {
-                            "file": None,
-                            "shape": [0, 0],
-                            "dtype": "float32"
-                        }
+                        if item_activation_matrix.numel() > 0:
+                            activation_np = item_activation_matrix.to(torch.float32).cpu().numpy()
+                            averages = compute_activation_averages(activation_np, token_indices)
+                            
+                            # Save activation as compressed binary file
+                            activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
+                            os.makedirs(activations_dir, exist_ok=True)
+                            
+                            activation_file = f"layer_{layer_idx}_example_{data_idx}.npz"
+                            activation_path = os.path.join(activations_dir, activation_file)
+                            
+                            np.savez_compressed(
+                                activation_path,
+                                activation=activation_np,
+                                layer=layer_idx,
+                                example_id=data_idx,
+                                shape=item_activation_matrix.shape,
+                                **averages  # Include averaged representations
+                            )
+                            
+                            data[data_idx]["activations"][f"layer_{layer_idx}"] = {
+                                "file": activation_file,
+                                "shape": list(item_activation_matrix.shape),
+                                "dtype": "float32",
+                                "token_indices": token_indices,
+                                "averages": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in averages.items() if not k.endswith('_activation')}
+                            }
+                        else:
+                            data[data_idx]["activations"][f"layer_{layer_idx}"] = {
+                                "file": None,
+                                "shape": [0, 0],
+                                "dtype": "float32"
+                            }
+                            
                 finally:
-                    hook_handle.remove()
+                    for handle in hook_handles:
+                        handle.remove()
         
         # Clear GPU cache between batches
         torch.cuda.empty_cache()
@@ -920,7 +938,7 @@ def main():
         if usage_ratio > 0.85:
             print(f"High memory usage: {memory_used:.1f}/{memory_total:.1f} GB ({usage_ratio:.1%})")
     
-    print(f"Completed processing all {len(prompts)} prompts")
+    print(f"Completed processing all {len(prompts)} prompts for layers {target_layers}")
     # -------------------------------
 
     # Filter data to only include processed examples
@@ -969,6 +987,7 @@ def main():
         "negative_examples": sum(1 for item in filtered_data if item.get("label") == 0),
         "time_required": str(timedelta(seconds=int(time.time() - og_time))),
         "batch_size_used": args.batch_size,
+        "layers_extracted": target_layers,
         "avg_output_length": avg_output_length,
         "avg_reasoning_length": avg_reasoning_length,
         "avg_answer_length": avg_answer_length,
@@ -987,6 +1006,7 @@ def main():
         json.dump(result_data, f, indent=2)
 
     print(f"Generated {len(all_outputs)} outputs")
+    print(f"Extracted activations from {len(target_layers)} layers: {target_layers}")
     print(f"Utility score: {utility_score['utility_score_avg']:.4f}")
     print(
         f"PII leakage (Binarized) - Output: {pii_leakage['output_bin_avg']:.4f}, "

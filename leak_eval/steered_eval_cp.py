@@ -171,7 +171,8 @@ def create_steering_hook(steering_vector, steering_strength, steering_method="ad
         # Apply steering to the activation
         if steering_vector is not None:
             device = activation.device
-            steering_vec = steering_vector.to(device)
+            # Match both device and dtype of the activation tensor
+            steering_vec = steering_vector.to(device=device, dtype=activation.dtype)
             
             # Ensure steering vector matches activation dimensions
             if len(steering_vec.shape) == 1:
@@ -438,7 +439,7 @@ def generate_batch_with_activations(model, tokenizer, batch_texts, args, target_
         print(f"⚠️  STEERING: Steering vector loaded but no steering layers specified. Use --steering_layers to apply steering.")
     
     try:
-        print(f"[BATCH DEBUG] Processing batch with {len(batch_texts)} items" + (" (with steering)" if steering_vector and args.steering_layers else ""))
+        print(f"[BATCH DEBUG] Processing batch with {len(batch_texts)} items" + (" (with steering)" if steering_vector is not None and args.steering_layers else ""))
         
         # Tokenize batch with padding
         inputs = tokenizer(
@@ -855,7 +856,7 @@ def main():
                 activations_dir = os.path.join(os.path.dirname(args.output_file), "steered_activations")
                 os.makedirs(activations_dir, exist_ok=True)
                 
-                activation_file = f"layer_{target_layer_idx}_example_{data_idx}.npz"
+                activation_file = f"steered_layer_{target_layer_idx}_example_{data_idx}.npz"
                 activation_path = os.path.join(activations_dir, activation_file)
                 
                 np.savez_compressed(
@@ -1055,7 +1056,7 @@ def main():
                         activations_dir = os.path.join(os.path.dirname(args.output_file), "activations")
                         os.makedirs(activations_dir, exist_ok=True)
                         
-                        activation_file = f"layer_{target_layer_idx}_example_{data_idx}.npz"
+                        activation_file = f"steered_layer_{target_layer_idx}_example_{data_idx}.npz"
                         activation_path = os.path.join(activations_dir, activation_file)
                         
                         np.savez_compressed(
