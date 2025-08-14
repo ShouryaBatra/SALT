@@ -21,6 +21,9 @@ from rich.panel import Panel
 from rich.table import Table
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+# Global debug switch (set from --debug_logs)
+DEBUG_LOGS = False
+
 from cp_eval_utils import (
     calculate_openai_cost,
     compute_gpt_extraction_for_all,
@@ -248,6 +251,11 @@ def parse_args():
         default=1,
         help="Step size when using 'all' layers (e.g., 4 would extract every 4th layer)",
     )
+    parser.add_argument(
+        "--debug_logs",
+        action="store_true",
+        help="Enable verbose activation debug logs",
+    )
     return parser.parse_args()
 
 def parse_layer_specification(layers_arg, num_layers, layer_step=1):
@@ -315,8 +323,9 @@ def generate_batch_with_multilayer_activations(model, tokenizer, batch_texts, ar
                 activation = output
             
             # DEBUG: Print activation shapes
-            print(f"[LAYER {layer_idx} DEBUG] Hook fired #{activation_counts[layer_idx]}")
-            print(f"[LAYER {layer_idx} DEBUG] Activation shape: {activation.shape}")
+            if DEBUG_LOGS:
+                print(f"[LAYER {layer_idx} DEBUG] Hook fired #{activation_counts[layer_idx]}")
+                print(f"[LAYER {layer_idx} DEBUG] Activation shape: {activation.shape}")
             
             # Store activation for this layer
             layer_activations[layer_idx].append(activation.detach().cpu())
@@ -331,7 +340,8 @@ def generate_batch_with_multilayer_activations(model, tokenizer, batch_texts, ar
         hook_handles.append(handle)
     
     try:
-        print(f"[MULTILAYER DEBUG] Processing batch with {len(batch_texts)} items for layers {target_layers}")
+        if DEBUG_LOGS:
+            print(f"[MULTILAYER DEBUG] Processing batch with {len(batch_texts)} items for layers {target_layers}")
         
         # Tokenize batch with padding
         inputs = tokenizer(
@@ -342,7 +352,8 @@ def generate_batch_with_multilayer_activations(model, tokenizer, batch_texts, ar
             max_length=4096  # Reasonable limit
         ).to(model.device)
         
-        print(f"[MULTILAYER DEBUG] Input shape after tokenization: {inputs['input_ids'].shape}")
+        if DEBUG_LOGS:
+            print(f"[MULTILAYER DEBUG] Input shape after tokenization: {inputs['input_ids'].shape}")
         
         # Set up generation parameters
         gen_kwargs = {
@@ -370,7 +381,8 @@ def generate_batch_with_multilayer_activations(model, tokenizer, batch_texts, ar
         with torch.no_grad():
             output_ids = model.generate(**inputs, **gen_kwargs)
         
-        print(f"[MULTILAYER DEBUG] Output shape after generation: {output_ids.shape}")
+        if DEBUG_LOGS:
+            print(f"[MULTILAYER DEBUG] Output shape after generation: {output_ids.shape}")
         
         # Decode outputs and clean repeated input
         outputs = []
@@ -399,50 +411,61 @@ def generate_batch_with_multilayer_activations(model, tokenizer, batch_texts, ar
         batch_layer_activations = {}
         for layer_idx in target_layers:
             activations = layer_activations[layer_idx]
-            print(f"[LAYER {layer_idx} DEBUG] Total activations captured: {len(activations)}")
+            if DEBUG_LOGS:
+                print(f"[LAYER {layer_idx} DEBUG] Total activations captured: {len(activations)}")
             
             batch_activations = []
             if activations and len(activations) >= 2:
-                print(f"[LAYER {layer_idx} DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
+                if DEBUG_LOGS:
+                    print(f"[LAYER {layer_idx} DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
                 
                 # First activation: input processing [batch_size, input_len, hidden_dim]
                 input_activations = activations[0]
-                print(f"[LAYER {layer_idx} DEBUG] Input activations shape: {input_activations.shape}")
+                if DEBUG_LOGS:
+                    print(f"[LAYER {layer_idx} DEBUG] Input activations shape: {input_activations.shape}")
                 
                 # Remaining activations: generated tokens [batch_size, 1, hidden_dim] each
                 generated_activations = activations[1:]
-                print(f"[LAYER {layer_idx} DEBUG] Generated activations count: {len(generated_activations)}")
+                if DEBUG_LOGS:
+                    print(f"[LAYER {layer_idx} DEBUG] Generated activations count: {len(generated_activations)}")
                 
                 # Concatenate all generated token activations
                 if generated_activations:
                     generated_tensor = torch.cat(generated_activations, dim=1)  # [batch_size, gen_len, hidden_dim]
-                    print(f"[LAYER {layer_idx} DEBUG] Generated tensor shape: {generated_tensor.shape}")
+                    if DEBUG_LOGS:
+                        print(f"[LAYER {layer_idx} DEBUG] Generated tensor shape: {generated_tensor.shape}")
                     
                     # Combine input + generated activations
                     full_sequence_activations = torch.cat([input_activations, generated_tensor], dim=1)
-                    print(f"[LAYER {layer_idx} DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
+                    if DEBUG_LOGS:
+                        print(f"[LAYER {layer_idx} DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
                 else:
                     full_sequence_activations = input_activations
-                    print(f"[LAYER {layer_idx} DEBUG] No generated tokens, using input activations only")
+                    if DEBUG_LOGS:
+                        print(f"[LAYER {layer_idx} DEBUG] No generated tokens, using input activations only")
                 
                 # Split by batch items to get per-example activation matrices
                 for i in range(len(batch_texts)):
                     # Each item gets a 2D matrix: [sequence_length, hidden_dim]
                     item_activation_matrix = full_sequence_activations[i]  # Shape: [seq_len, hidden_dim]
-                    print(f"[LAYER {layer_idx} DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
+                    if DEBUG_LOGS:
+                        print(f"[LAYER {layer_idx} DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
                     batch_activations.append(item_activation_matrix)
             
             elif activations and len(activations) == 1:
                 # Only input processing, no generation
-                print(f"[LAYER {layer_idx} DEBUG] Only input activations captured")
+                if DEBUG_LOGS:
+                    print(f"[LAYER {layer_idx} DEBUG] Only input activations captured")
                 input_activations = activations[0]
                 for i in range(len(batch_texts)):
                     item_activation_matrix = input_activations[i]
-                    print(f"[LAYER {layer_idx} DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
+                    if DEBUG_LOGS:
+                        print(f"[LAYER {layer_idx} DEBUG] Item {i} activation matrix shape: {item_activation_matrix.shape}")
                     batch_activations.append(item_activation_matrix)
             
             else:
-                print(f"[LAYER {layer_idx} DEBUG] No activations captured")
+                if DEBUG_LOGS:
+                    print(f"[LAYER {layer_idx} DEBUG] No activations captured")
                 # Return empty activations for each item
                 for i in range(len(batch_texts)):
                     batch_activations.append(torch.empty(0, 3584))
@@ -469,6 +492,9 @@ def check_memory_usage():
 def main():
     og_time = time.time()
     args = parse_args()
+    # Set global debug flag based on CLI
+    global DEBUG_LOGS
+    DEBUG_LOGS = bool(getattr(args, "debug_logs", False))
     seed = args.seed
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
@@ -801,8 +827,9 @@ def main():
                         else:
                             activation = output
                         
-                        print(f"[SEQ LAYER {layer_idx} DEBUG] Hook fired #{activation_counts[layer_idx]}")
-                        print(f"[SEQ LAYER {layer_idx} DEBUG] Activation shape: {activation.shape}")
+                        if DEBUG_LOGS:
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] Hook fired #{activation_counts[layer_idx]}")
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] Activation shape: {activation.shape}")
                         
                         layer_activations[layer_idx].append(activation.detach().cpu())
                     
@@ -851,44 +878,55 @@ def main():
                     
                     for layer_idx in target_layers:
                         activations = layer_activations[layer_idx]
-                        print(f"[SEQ LAYER {layer_idx} DEBUG] Total activations captured: {len(activations)}")
+                        if DEBUG_LOGS:
+                            print(f"[SEQ LAYER {layer_idx} DEBUG] Total activations captured: {len(activations)}")
                         
                         if activations and len(activations) >= 2:
-                            print(f"[SEQ LAYER {layer_idx} DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
+                            if DEBUG_LOGS:
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] Reconstructing full sequence from {len(activations)} captured activations")
                             
                             # First activation: input processing [1, input_len, hidden_dim]
                             input_activations = activations[0]
-                            print(f"[SEQ LAYER {layer_idx} DEBUG] Input activations shape: {input_activations.shape}")
+                            if DEBUG_LOGS:
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] Input activations shape: {input_activations.shape}")
                             
                             # Remaining activations: generated tokens [1, 1, hidden_dim] each
                             generated_activations = activations[1:]
-                            print(f"[SEQ LAYER {layer_idx} DEBUG] Generated activations count: {len(generated_activations)}")
+                            if DEBUG_LOGS:
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] Generated activations count: {len(generated_activations)}")
                             
                             # Concatenate all generated token activations
                             if generated_activations:
                                 generated_tensor = torch.cat(generated_activations, dim=1)  # [1, gen_len, hidden_dim]
-                                print(f"[SEQ LAYER {layer_idx} DEBUG] Generated tensor shape: {generated_tensor.shape}")
+                                if DEBUG_LOGS:
+                                    print(f"[SEQ LAYER {layer_idx} DEBUG] Generated tensor shape: {generated_tensor.shape}")
                                 
                                 # Combine input + generated activations
                                 full_sequence_activations = torch.cat([input_activations, generated_tensor], dim=1)
-                                print(f"[SEQ LAYER {layer_idx} DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
+                                if DEBUG_LOGS:
+                                    print(f"[SEQ LAYER {layer_idx} DEBUG] Full sequence activations shape: {full_sequence_activations.shape}")
                             else:
                                 full_sequence_activations = input_activations
-                                print(f"[SEQ LAYER {layer_idx} DEBUG] No generated tokens, using input activations only")
+                                if DEBUG_LOGS:
+                                    print(f"[SEQ LAYER {layer_idx} DEBUG] No generated tokens, using input activations only")
                             
                             # Remove batch dimension for sequential processing [seq_len, hidden_dim]
                             item_activation_matrix = full_sequence_activations[0]
-                            print(f"[SEQ LAYER {layer_idx} DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
+                            if DEBUG_LOGS:
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
                             
                         elif activations and len(activations) == 1:
                             # Only input processing, no generation
-                            print(f"[SEQ LAYER {layer_idx} DEBUG] Only input activations captured")
+                            if DEBUG_LOGS:
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] Only input activations captured")
                             input_activations = activations[0]
                             item_activation_matrix = input_activations[0]  # Remove batch dimension
-                            print(f"[SEQ LAYER {layer_idx} DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
+                            if DEBUG_LOGS:
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] Final activation matrix shape: {item_activation_matrix.shape}")
                             
                         else:
-                            print(f"[SEQ LAYER {layer_idx} DEBUG] No activations captured")
+                            if DEBUG_LOGS:
+                                print(f"[SEQ LAYER {layer_idx} DEBUG] No activations captured")
                             item_activation_matrix = torch.empty(0, 3584)
                         
                         # Compute activation averages for different segments
