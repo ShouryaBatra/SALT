@@ -252,6 +252,17 @@ def parse_args():
         help="Step size when using 'all' layers (e.g., 4 would extract every 4th layer)",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from existing output JSON (append new processed examples)",
+    )
+    parser.add_argument(
+        "--flush_every",
+        type=int,
+        default=1,
+        help="Write incremental results to output JSON after every N processed examples",
+    )
+    parser.add_argument(
         "--debug_logs",
         action="store_true",
         help="Enable verbose activation debug logs",
@@ -694,6 +705,25 @@ def main():
 
     # ---- Multi-Layer Batch Processing with Activation Extraction ------
     all_outputs = []
+    # Resume support: load existing result file if requested
+    processed_indices = set()
+    if args.resume and os.path.exists(args.output_file):
+        try:
+            with open(args.output_file, "r") as f:
+                prev = json.load(f)
+            prev_data = prev.get("data", [])
+            # Mark already processed indices (by stored example_id)
+            for item in prev_data:
+                if "example_id" in item:
+                    processed_indices.add(item["example_id"]) 
+            print(f"Resuming: found {len(processed_indices)} processed examples in {args.output_file}")
+            # When resuming, we will append; keep previous structure
+            accumulated_data = prev_data
+        except Exception:
+            print("Resume requested but failed to read/parse existing output. Starting fresh.")
+            accumulated_data = []
+    else:
+        accumulated_data = []
     
     # Process prompts in batches
     total_batches = (len(prompts) + args.batch_size - 1) // args.batch_size
@@ -722,6 +752,9 @@ def main():
             for i, output_text in enumerate(batch_outputs):
                 idx_in_batch = batch_idx + i
                 data_idx = valid_indices[idx_in_batch]
+                if data_idx in processed_indices:
+                    # Skip already processed
+                    continue
                 prompt_text = batch_texts[i]
                 
                 data[data_idx]["model_output"] = [output_text]
@@ -738,6 +771,7 @@ def main():
                     data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
                 else:
                     data[data_idx]["close_think_tokens"] = [0]
+                data[data_idx]["example_id"] = data_idx
 
                 # Get cleaned sequence for token indexing
                 if hasattr(generate_batch_with_multilayer_activations, 'cleaned_sequences'):
@@ -783,6 +817,22 @@ def main():
                         "token_indices": token_indices,
                         "averages": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in averages.items() if not k.endswith('_activation')}
                     }
+
+                # Append to accumulated_data and flush periodically
+                accumulated_data.append(data[data_idx])
+                processed_indices.add(data_idx)
+                if len(processed_indices) % max(1, args.flush_every) == 0:
+                    partial = {
+                        "args": vars(args),
+                        "summary": {
+                            "partial": True,
+                            "processed_examples": len(processed_indices),
+                        },
+                        "data": accumulated_data,
+                    }
+                    os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
+                    with open(args.output_file, "w") as f:
+                        json.dump(partial, f, indent=2)
             
         except Exception as e:
             print(f"Error processing batch {current_batch_num}: {e}")
@@ -857,6 +907,9 @@ def main():
                     output_text = tokenizer.decode(clean_generated_ids, skip_special_tokens=True)
                     all_outputs.append(output_text)
                     
+                    if data_idx in processed_indices:
+                        # Skip already processed
+                        continue
                     data[data_idx]["model_output"] = [output_text]
                     reasoning, answer = split_by_think(output_text, end_think_token)
                     data[data_idx]["model_reasoning"] = [reasoning]
@@ -870,6 +923,7 @@ def main():
                         data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)]
                     else:
                         data[data_idx]["close_think_tokens"] = [0]
+                    data[data_idx]["example_id"] = data_idx
                     
                     token_indices = find_special_token_indices(tokenizer, clean_complete_seq, start_think_token, end_think_token)
                     
@@ -967,6 +1021,22 @@ def main():
                 finally:
                     for handle in hook_handles:
                         handle.remove()
+
+                # Append and flush for sequential path as well
+                accumulated_data.append(data[data_idx])
+                processed_indices.add(data_idx)
+                if len(processed_indices) % max(1, args.flush_every) == 0:
+                    partial = {
+                        "args": vars(args),
+                        "summary": {
+                            "partial": True,
+                            "processed_examples": len(processed_indices),
+                        },
+                        "data": accumulated_data,
+                    }
+                    os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
+                    with open(args.output_file, "w") as f:
+                        json.dump(partial, f, indent=2)
         
         # Clear GPU cache between batches
         torch.cuda.empty_cache()
