@@ -267,6 +267,11 @@ def parse_args():
         action="store_true",
         help="Enable verbose activation debug logs",
     )
+    parser.add_argument(
+        "--enable_gpt_eval",
+        action="store_true",
+        help="Enable PII leakage metrics and optional GPT evaluation (restores previous behavior)",
+    )
     return parser.parse_args()
 
 def parse_layer_specification(layers_arg, num_layers, layer_step=1):
@@ -1051,45 +1056,50 @@ def main():
 
     # Filter data to only include processed examples
     filtered_data = [data[i] for i in valid_indices]
-    approp_matrix_path = "approp_matrix.csv"
-    print(f"Loading appropriateness matrix from {approp_matrix_path}")
-    approp_matrix_df = pd.read_csv(approp_matrix_path, index_col=0)
+    # Optionally compute PII leakage (non-GPT) and always compute utility
+    if getattr(args, "enable_gpt_eval", False):
+        approp_matrix_path = "approp_matrix.csv"
+        print(f"Loading appropriateness matrix from {approp_matrix_path}")
+        approp_matrix_df = pd.read_csv(approp_matrix_path, index_col=0)
+        pii_leakage = compute_pii_leakage(filtered_data, approp_matrix_df)
     utility_score = compute_utility_score(filtered_data, args.ref_answer)
-    pii_leakage = compute_pii_leakage(filtered_data, approp_matrix_df)
 
-    avg_output_length = sum(
-        [
-            sum(item["output_token_length"]) / len(item["output_token_length"])
-            for item in filtered_data
-        ]
-    ) / len(filtered_data)
-    avg_reasoning_length = sum(
-        [
-            sum(item["reasoning_token_length"]) / len(item["reasoning_token_length"])
-            for item in filtered_data
-        ]
-    ) / len(filtered_data)
-    avg_answer_length = sum(
-        [
-            sum(item["answer_token_length"]) / len(item["answer_token_length"])
-            for item in filtered_data
-        ]
-    ) / len(filtered_data)
-    avg_close_think_tokens = sum(
-        [
-            sum(item["close_think_tokens"]) / len(item["close_think_tokens"])
-            for item in filtered_data
-        ]
-    ) / len(filtered_data)
-    max_close_think_tokens = (
-        max([max(item["close_think_tokens"]) for item in filtered_data])
-        if filtered_data
-        else 0
+    # Safely compute averages only over items that contain expected fields
+    items_with_output = [it for it in filtered_data if "output_token_length" in it]
+    items_with_reasoning = [it for it in filtered_data if "reasoning_token_length" in it]
+    items_with_answer = [it for it in filtered_data if "answer_token_length" in it]
+    items_with_close_think = [it for it in filtered_data if "close_think_tokens" in it]
+
+    avg_output_length = (
+        sum(
+            [sum(it["output_token_length"]) / max(1, len(it["output_token_length"])) for it in items_with_output]
+        ) / max(1, len(items_with_output))
     )
+    avg_reasoning_length = (
+        sum(
+            [sum(it["reasoning_token_length"]) / max(1, len(it["reasoning_token_length"])) for it in items_with_reasoning]
+        ) / max(1, len(items_with_reasoning))
+    )
+    avg_answer_length = (
+        sum(
+            [sum(it["answer_token_length"]) / max(1, len(it["answer_token_length"])) for it in items_with_answer]
+        ) / max(1, len(items_with_answer))
+    )
+    avg_close_think_tokens = (
+        sum(
+            [sum(it["close_think_tokens"]) / max(1, len(it["close_think_tokens"])) for it in items_with_close_think]
+        ) / max(1, len(items_with_close_think))
+    )
+    # Max close_think_tokens across items that contain the field
+    if items_with_close_think:
+        max_close_think_tokens = max(
+            [max(it["close_think_tokens"]) for it in items_with_close_think if it["close_think_tokens"]]
+        ) if any(it["close_think_tokens"] for it in items_with_close_think) else 0
+    else:
+        max_close_think_tokens = 0
 
     summary = {
         "utility_score": utility_score,
-        "pii_leakage": pii_leakage,
         "total_examples": len(filtered_data),
         "positive_examples": sum(1 for item in filtered_data if item.get("label") == 1),
         "negative_examples": sum(1 for item in filtered_data if item.get("label") == 0),
@@ -1102,6 +1112,10 @@ def main():
         "avg_close_think_tokens": avg_close_think_tokens,
         "max_close_think_tokens": max_close_think_tokens,
     }
+
+    # Include non-GPT PII leakage only when enabled
+    if getattr(args, "enable_gpt_eval", False):
+        summary["pii_leakage"] = pii_leakage
 
     result_data = {
         "args": vars(args),
@@ -1116,11 +1130,12 @@ def main():
     print(f"Generated {len(all_outputs)} outputs")
     print(f"Extracted activations from {len(target_layers)} layers: {target_layers}")
     print(f"Utility score: {utility_score['utility_score_avg']:.4f}")
-    print(
-        f"PII leakage (Binarized) - Output: {pii_leakage['output_bin_avg']:.4f}, "
-        f"Reasoning: {pii_leakage['reasoning_bin_avg']:.4f}, "
-        f"Answer: {pii_leakage['answer_bin_avg']:.4f}"
-    )
+    if getattr(args, "enable_gpt_eval", False):
+        print(
+            f"PII leakage (Binarized) - Output: {pii_leakage['output_bin_avg']:.4f}, "
+            f"Reasoning: {pii_leakage['reasoning_bin_avg']:.4f}, "
+            f"Answer: {pii_leakage['answer_bin_avg']:.4f}"
+        )
     print(
         f"Average token lengths - Output: {avg_output_length:.2f}, Reasoning: {avg_reasoning_length:.2f}, Answer: {avg_answer_length:.2f}"
     )
@@ -1128,7 +1143,8 @@ def main():
         f"Think tokens - Avg: {avg_close_think_tokens:.2f}, Max: {max_close_think_tokens}"
     )
 
-    if args.gpt_eval:
+    # Conditionally run GPT evaluation (restores previous behavior)
+    if getattr(args, "enable_gpt_eval", False) and args.gpt_eval:
         if not os.getenv("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY environment variable is required for GPT evaluation")
         print(f"\nRunning GPT evaluation using {args.gpt_eval_model}...")
@@ -1138,9 +1154,15 @@ def main():
             prompt_inj=args.prompt_inj is not None,
         )
         total_cost = calculate_openai_cost(all_responses)
+        # Remove verbose prompt text to reduce JSON size
         for item in filtered_data:
             if "formatted_situation_prompt" in item:
                 del item["formatted_situation_prompt"]
+        # Ensure appropriateness matrix is loaded
+        if 'approp_matrix_df' not in locals():
+            approp_matrix_path = "approp_matrix.csv"
+            print(f"Loading appropriateness matrix from {approp_matrix_path}")
+            approp_matrix_df = pd.read_csv(approp_matrix_path, index_col=0)
         gpt_utility_score = compute_gpt_utility_score(filtered_data, args.ref_answer)
         gpt_pii_leakage = compute_gpt_pii_leakage(filtered_data, approp_matrix_df)
         summary.update(
