@@ -5,6 +5,7 @@ import os
 from typing import Dict, List, Tuple
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 def load_labels_from_results(results_json_path: str) -> Dict[int, int]:
@@ -268,6 +269,23 @@ def save_outputs(
     summary_path = os.path.join(output_dir, "leak_layer_summary.json")
     with open(summary_path, "w") as f:
         json.dump({"layers": rows}, f, indent=2)
+
+    # Save bar chart: layer index vs flagged neuron count
+    try:
+        layers = [row["layer"] for row in rows]
+        flagged_counts = [row["flagged_count"] for row in rows]
+        plt.figure(figsize=(12, 4))
+        plt.bar(layers, flagged_counts, color="#4C78A8")
+        plt.xlabel("Layer index")
+        plt.ylabel("Flagged neurons (|d| >= threshold)")
+        plt.title("Flagged neurons by layer")
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, "flagged_neurons_by_layer.png")
+        plt.savefig(plot_path, dpi=200)
+        plt.close()
+    except Exception:
+        # Plotting failures should not break analysis
+        pass
 
     # Optionally save steering vectors (per layer)
     if save_vectors:
