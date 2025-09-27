@@ -238,6 +238,7 @@ def save_outputs(
     output_dir: str,
     save_vectors: bool,
     vector_kind: str,
+    threshold: float,
     top_k_dims: int,
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -277,7 +278,7 @@ def save_outputs(
         plt.figure(figsize=(12, 4))
         plt.bar(layers, flagged_counts, color="#4C78A8")
         plt.xlabel("Layer index")
-        plt.ylabel("Flagged neurons (|d| >= threshold)")
+        plt.ylabel(f"Flagged neurons (|d| >= {threshold})")
         plt.title("Flagged neurons by layer")
         plt.tight_layout()
         plot_path = os.path.join(output_dir, "flagged_neurons_by_layer.png")
@@ -314,6 +315,171 @@ def save_outputs(
             np.save(out_path, vec_to_save)
 
 
+def collect_layer_vectors(
+    activations_dir: str,
+    labels: Dict[int, int],
+    segment: str,
+) -> Tuple[Dict[int, List[np.ndarray]], Dict[int, List[np.ndarray]], Dict[int, int]]:
+    """Load activation vectors per layer, split into leaky/non-leaky groups, and record hidden dims.
+
+    Returns (by_layer_pos, by_layer_neg, hidden_dim_by_layer).
+    """
+    npz_paths = glob.glob(os.path.join(activations_dir, "layer_*_example_*.npz"))
+    if not npz_paths:
+        raise FileNotFoundError(f"No activation files found in {activations_dir}")
+
+    by_layer_pos: Dict[int, List[np.ndarray]] = {}
+    by_layer_neg: Dict[int, List[np.ndarray]] = {}
+    hidden_dim_by_layer: Dict[int, int] = {}
+
+    for path in npz_paths:
+        try:
+            npz = np.load(path, allow_pickle=True)
+        except Exception:
+            continue
+
+        try:
+            layer_idx = int(npz.get("layer")) if "layer" in npz else None
+            example_id = int(npz.get("example_id")) if "example_id" in npz else None
+        except Exception:
+            layer_idx = None
+            example_id = None
+
+        if layer_idx is None or example_id is None:
+            base = os.path.basename(path).replace(".npz", "")
+            try:
+                parts = base.split("_")
+                layer_idx = int(parts[1])
+                example_id = int(parts[3])
+            except Exception:
+                continue
+
+        try:
+            vec = pick_activation_vector(npz, segment)
+        except Exception:
+            continue
+        if vec is None or vec.size == 0:
+            continue
+
+        hidden_dim_by_layer[layer_idx] = int(vec.shape[0])
+        label = labels.get(example_id, 0)
+        if label == 1:
+            by_layer_pos.setdefault(layer_idx, []).append(vec)
+        else:
+            by_layer_neg.setdefault(layer_idx, []).append(vec)
+
+    return by_layer_pos, by_layer_neg, hidden_dim_by_layer
+
+
+def compute_layer_effects_once(
+    by_layer_pos: Dict[int, List[np.ndarray]],
+    by_layer_neg: Dict[int, List[np.ndarray]],
+    hidden_dim_by_layer: Dict[int, int],
+    min_examples: int,
+) -> Tuple[List[Dict], Dict[int, Dict[str, np.ndarray]]]:
+    """Compute per-layer delta and cohen_d once, plus base row info (no thresholding)."""
+    base_rows: List[Dict] = []
+    vectors: Dict[int, Dict[str, np.ndarray]] = {}
+
+    all_layers = sorted(set(list(by_layer_pos.keys()) + list(by_layer_neg.keys())))
+    for layer in all_layers:
+        pos_list = by_layer_pos.get(layer, [])
+        neg_list = by_layer_neg.get(layer, [])
+        hidden_dim = hidden_dim_by_layer.get(layer)
+
+        num_pos = len(pos_list)
+        num_neg = len(neg_list)
+        if hidden_dim is None or num_pos < min_examples or num_neg < min_examples:
+            continue
+
+        pos_matrix = np.stack(pos_list, axis=0)
+        neg_matrix = np.stack(neg_list, axis=0)
+        delta, d = compute_effects(pos_matrix, neg_matrix)
+
+        base_rows.append({
+            "layer": layer,
+            "hidden_dim": hidden_dim,
+            "num_pos": num_pos,
+            "num_neg": num_neg,
+        })
+        vectors[layer] = {"delta": delta, "cohen_d": d}
+
+    # Sort layers by layer index for stable downstream processing
+    base_rows.sort(key=lambda r: r["layer"])
+    return base_rows, vectors
+
+
+def rows_for_threshold(base_rows: List[Dict], vectors: Dict[int, Dict[str, np.ndarray]], threshold: float) -> List[Dict]:
+    """Build rows including flagged_count and density given a threshold, using precomputed d."""
+    rows: List[Dict] = []
+    for r in base_rows:
+        layer = r["layer"]
+        hidden_dim = r["hidden_dim"]
+        d = vectors[layer]["cohen_d"]
+        flagged = np.abs(d) >= threshold
+        flagged_count = int(flagged.sum())
+        density = float(flagged_count) / float(hidden_dim)
+        rows.append({
+            **r,
+            "flagged_count": flagged_count,
+            "density": density,
+            "mean_abs_d": float(np.abs(d).mean()),
+            "sum_abs_delta": float(np.abs(vectors[layer]["delta"]).sum()),
+            "l2_norm_delta": float(np.linalg.norm(vectors[layer]["delta"]))
+        })
+    # Sort by density then flagged_count, descending
+    rows.sort(key=lambda rr: (rr["density"], rr["flagged_count"]), reverse=True)
+    return rows
+
+
+def save_csv_json_plot(rows: List[Dict], output_dir: str, threshold: float) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save CSV with threshold suffix
+    import csv
+    thr_tag = str(threshold).replace(".", "_")
+    csv_path = os.path.join(output_dir, f"leak_layer_ranking_thr_{thr_tag}.csv")
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "layer",
+                "hidden_dim",
+                "num_pos",
+                "num_neg",
+                "flagged_count",
+                "density",
+                "sum_abs_delta",
+                "l2_norm_delta",
+                "mean_abs_d",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    # Save JSON summary with threshold suffix
+    summary_path = os.path.join(output_dir, f"leak_layer_summary_thr_{thr_tag}.json")
+    with open(summary_path, "w") as f:
+        json.dump({"threshold": threshold, "layers": rows}, f, indent=2)
+
+    # Plot
+    try:
+        layers = [row["layer"] for row in rows]
+        flagged_counts = [row["flagged_count"] for row in rows]
+        plt.figure(figsize=(12, 4))
+        plt.bar(layers, flagged_counts, color="#4C78A8")
+        plt.xlabel("Layer index")
+        plt.ylabel(f"Flagged neurons (|d| >= {threshold})")
+        plt.title("Flagged neurons by layer")
+        plt.tight_layout()
+        plot_path = os.path.join(output_dir, f"flagged_neurons_by_layer_thr_{thr_tag}.png")
+        plt.savefig(plot_path, dpi=200)
+        plt.close()
+    except Exception:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -332,6 +498,7 @@ def main():
         help="Which averaged activation to use per example",
     )
     parser.add_argument("--threshold", type=float, default=4.0, help="Threshold on |Cohen's d| to flag neurons")
+    parser.add_argument("--thresholds", nargs='+', type=float, help="Multiple thresholds for |Cohen's d|; overrides --threshold")
     parser.add_argument("--min_examples", type=int, default=1, help="Minimum examples per class per layer to compute effects")
     parser.add_argument("--output_dir", type=str, default="results/leak_layer_analysis", help="Where to save rankings and outputs")
     parser.add_argument("--save_vectors", action="store_true", help="Also save per-layer steering vectors")
@@ -347,31 +514,59 @@ def main():
     args = parser.parse_args()
 
     labels = load_labels_from_results(args.results_json)
-    rows, vectors = analyze_layers(
+
+    # Collect vectors once and compute effects once
+    by_layer_pos, by_layer_neg, hidden_dim_by_layer = collect_layer_vectors(
         activations_dir=args.activations_dir,
         labels=labels,
         segment=args.segment,
-        threshold=args.threshold,
+    )
+    base_rows, vectors = compute_layer_effects_once(
+        by_layer_pos=by_layer_pos,
+        by_layer_neg=by_layer_neg,
+        hidden_dim_by_layer=hidden_dim_by_layer,
         min_examples=args.min_examples,
     )
 
     os.makedirs(args.output_dir, exist_ok=True)
-    save_outputs(
-        rows=rows,
-        vectors=vectors,
-        output_dir=args.output_dir,
-        save_vectors=args.save_vectors,
-        vector_kind=args.vector_kind,
-        top_k_dims=args.top_k_dims,
-    )
 
-    # Print top few layers for quick view
-    print("Top layers by density (first 10):")
-    for row in rows[:10]:
-        print(
-            f"Layer {row['layer']:>3} | density={row['density']:.4f} | flagged={row['flagged_count']:>5} "
-            f"| pos={row['num_pos']:>3} neg={row['num_neg']:>3} | hidden={row['hidden_dim']}"
-        )
+    # Determine thresholds list
+    thresholds = args.thresholds if args.thresholds else [args.threshold]
+
+    # Save per-threshold CSV/JSON/plot without recomputing neurons
+    for thr in thresholds:
+        thr_rows = rows_for_threshold(base_rows, vectors, thr)
+        save_csv_json_plot(thr_rows, args.output_dir, thr)
+
+    # Optionally save steering vectors once
+    if args.save_vectors:
+        vectors_dir = os.path.join(args.output_dir, "steering_vectors")
+        os.makedirs(vectors_dir, exist_ok=True)
+        for layer, vecs in vectors.items():
+            base = vecs["delta"] if args.vector_kind == "delta" else vecs["cohen_d"]
+            vec = base.astype(np.float32)
+            if args.top_k_dims and args.top_k_dims > 0 and args.top_k_dims < vec.shape[0]:
+                idx = np.argpartition(np.abs(vec), -args.top_k_dims)[-args.top_k_dims:]
+                sparse = np.zeros_like(vec)
+                sparse[idx] = vec[idx]
+                vec_to_save = sparse
+            else:
+                vec_to_save = vec
+            norm = np.linalg.norm(vec_to_save)
+            if norm > 0:
+                vec_to_save = vec_to_save / norm
+            out_path = os.path.join(vectors_dir, f"steering_vector_layer_{layer}.npy")
+            np.save(out_path, vec_to_save)
+
+    # Print top few layers for the first threshold (if any)
+    if thresholds:
+        example_rows = rows_for_threshold(base_rows, vectors, thresholds[0])
+        print("Top layers by density (first 10):")
+        for row in example_rows[:10]:
+            print(
+                f"Layer {row['layer']:>3} | density={row['density']:.4f} | flagged={row['flagged_count']:>5} "
+                f"| pos={row['num_pos']:>3} neg={row['num_neg']:>3} | hidden={row['hidden_dim']}"
+            )
 
 
 if __name__ == "__main__":
