@@ -1054,21 +1054,22 @@ def main():
     print(f"Completed processing all {len(prompts)} prompts for layers {target_layers}")
     # -------------------------------
 
-    # Filter data to only include processed examples
-    filtered_data = [data[i] for i in valid_indices]
+    # Merge previously processed results (resume) into current dataset by example_id
+    index_to_acc = {item["example_id"]: item for item in accumulated_data if "example_id" in item}
+    merged_data = [index_to_acc.get(i, data[i]) for i in valid_indices]
     # Optionally compute PII leakage (non-GPT) and always compute utility
     if getattr(args, "enable_gpt_eval", False):
         approp_matrix_path = "approp_matrix.csv"
         print(f"Loading appropriateness matrix from {approp_matrix_path}")
         approp_matrix_df = pd.read_csv(approp_matrix_path, index_col=0)
-        pii_leakage = compute_pii_leakage(filtered_data, approp_matrix_df)
-    utility_score = compute_utility_score(filtered_data, args.ref_answer)
+        pii_leakage = compute_pii_leakage(merged_data, approp_matrix_df)
+    utility_score = compute_utility_score(merged_data, args.ref_answer)
 
     # Safely compute averages only over items that contain expected fields
-    items_with_output = [it for it in filtered_data if "output_token_length" in it]
-    items_with_reasoning = [it for it in filtered_data if "reasoning_token_length" in it]
-    items_with_answer = [it for it in filtered_data if "answer_token_length" in it]
-    items_with_close_think = [it for it in filtered_data if "close_think_tokens" in it]
+    items_with_output = [it for it in merged_data if "output_token_length" in it]
+    items_with_reasoning = [it for it in merged_data if "reasoning_token_length" in it]
+    items_with_answer = [it for it in merged_data if "answer_token_length" in it]
+    items_with_close_think = [it for it in merged_data if "close_think_tokens" in it]
 
     avg_output_length = (
         sum(
@@ -1100,9 +1101,9 @@ def main():
 
     summary = {
         "utility_score": utility_score,
-        "total_examples": len(filtered_data),
-        "positive_examples": sum(1 for item in filtered_data if item.get("label") == 1),
-        "negative_examples": sum(1 for item in filtered_data if item.get("label") == 0),
+        "total_examples": len(merged_data),
+        "positive_examples": sum(1 for item in merged_data if item.get("label") == 1),
+        "negative_examples": sum(1 for item in merged_data if item.get("label") == 0),
         "time_required": str(timedelta(seconds=int(time.time() - og_time))),
         "batch_size_used": args.batch_size,
         "layers_extracted": target_layers,
@@ -1120,7 +1121,7 @@ def main():
     result_data = {
         "args": vars(args),
         "summary": summary,
-        "data": filtered_data,
+        "data": merged_data,
     }
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output_file)), exist_ok=True)
@@ -1149,13 +1150,13 @@ def main():
             raise ValueError("OPENAI_API_KEY environment variable is required for GPT evaluation")
         print(f"\nRunning GPT evaluation using {args.gpt_eval_model}...")
         all_responses = compute_gpt_extraction_for_all(
-            filtered_data,
+            merged_data,
             model=args.gpt_eval_model,
             prompt_inj=args.prompt_inj is not None,
         )
         total_cost = calculate_openai_cost(all_responses)
         # Remove verbose prompt text to reduce JSON size
-        for item in filtered_data:
+        for item in merged_data:
             if "formatted_situation_prompt" in item:
                 del item["formatted_situation_prompt"]
         # Ensure appropriateness matrix is loaded
@@ -1163,8 +1164,8 @@ def main():
             approp_matrix_path = "approp_matrix.csv"
             print(f"Loading appropriateness matrix from {approp_matrix_path}")
             approp_matrix_df = pd.read_csv(approp_matrix_path, index_col=0)
-        gpt_utility_score = compute_gpt_utility_score(filtered_data, args.ref_answer)
-        gpt_pii_leakage = compute_gpt_pii_leakage(filtered_data, approp_matrix_df)
+        gpt_utility_score = compute_gpt_utility_score(merged_data, args.ref_answer)
+        gpt_pii_leakage = compute_gpt_pii_leakage(merged_data, approp_matrix_df)
         summary.update(
             {
                 "gpt_utility_score": gpt_utility_score,
