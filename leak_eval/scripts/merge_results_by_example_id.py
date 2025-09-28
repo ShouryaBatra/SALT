@@ -37,6 +37,11 @@ def parse_args():
         help="Recompute utility/PII summaries after merge (no extra API calls)",
     )
     parser.add_argument(
+        "--fallback-positional",
+        action="store_true",
+        help="If base items lack example_id, replace by list index position",
+    )
+    parser.add_argument(
         "--ref_answer",
         default="ref_answer",
         help="Reference answer field for utility computation",
@@ -66,23 +71,28 @@ def main():
     base_data = base_json.get("data", [])
     update_data = update_json.get("data", [])
 
-    # Build replacement map from update by example_id
-    update_by_id = {}
-    for item in update_data:
-        eid = item.get("example_id")
-        if eid is not None:
-            update_by_id[eid] = item
-
-    # Replace in base where matching example_id found
-    merged_data = []
+    merged_data = list(base_data)
     replaced = 0
-    for item in base_data:
-        eid = item.get("example_id")
-        if eid is not None and eid in update_by_id:
-            merged_data.append(update_by_id[eid])
-            replaced += 1
-        else:
-            merged_data.append(item)
+
+    # Primary: replace by example_id when available
+    update_by_id = {it.get("example_id"): it for it in update_data if it.get("example_id") is not None}
+    if update_by_id:
+        for i, item in enumerate(merged_data):
+            eid = item.get("example_id")
+            if eid is not None and eid in update_by_id:
+                merged_data[i] = update_by_id[eid]
+                replaced += 1
+
+    # Fallback: positional replacement when requested
+    if args.fallback_positional:
+        limit = min(len(merged_data), len(update_data))
+        for i in range(limit):
+            base_has_id = merged_data[i].get("example_id") is not None
+            update_has_id = update_data[i].get("example_id") is not None
+            # Only replace positionally if base lacks id OR ids differ
+            if not base_has_id or (update_has_id and merged_data[i].get("example_id") != update_data[i].get("example_id")):
+                merged_data[i] = update_data[i]
+                replaced += 1
 
     base_json["data"] = merged_data
 
