@@ -301,14 +301,7 @@ def main():
         batch_texts = prepare_batch_prompts(batch_prompts, tokenizer)
 
         try:
-            # Activation & steering hooks
-            captured_activations: List[torch.Tensor] = []
-
-            def capture_hook(module, input, output):
-                act = output[0] if isinstance(output, tuple) else output
-                captured_activations.append(act.detach().cpu())
-
-            capture_handle = model.model.layers[steering_layer].register_forward_hook(capture_hook)
+            # Steering hook only (no activation capture)
             steering_handle = None
             if steering_vector is not None:
                 steering_handle = model.model.layers[steering_layer].register_forward_hook(
@@ -368,42 +361,6 @@ def main():
                 data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)] if end_think_token else [0]
                 data[data_idx]["example_id"] = data_idx
 
-                # Activations (for steering layer only)
-                if captured_activations:
-                    # Reconstruct full sequence activations
-                    input_acts = captured_activations[0]
-                    gen_acts = captured_activations[1:]
-                    if gen_acts:
-                        full_seq = torch.cat([input_acts, torch.cat(gen_acts, dim=1)], dim=1)
-                    else:
-                        full_seq = input_acts
-                    item_activation_matrix = full_seq[i]
-                    token_indices = find_special_token_indices(
-                        tokenizer, cleaned_complete_sequences[i], start_think_token, end_think_token
-                    )
-                    activation_np = item_activation_matrix.to(torch.float32).cpu().numpy()
-                    averages = compute_activation_averages(activation_np, token_indices)
-
-                    activations_dir = os.path.join(os.path.dirname(args.output_file), "steered_activations")
-                    os.makedirs(activations_dir, exist_ok=True)
-                    activation_file = f"steered_layer_{steering_layer}_example_{data_idx}.npz"
-                    activation_path = os.path.join(activations_dir, activation_file)
-                    np.savez_compressed(
-                        activation_path,
-                        activation=activation_np,
-                        layer=steering_layer,
-                        example_id=data_idx,
-                        shape=item_activation_matrix.shape,
-                        **averages,
-                    )
-                    data[data_idx]["activation"] = {
-                        "file": activation_file,
-                        "shape": list(item_activation_matrix.shape),
-                        "dtype": "float32",
-                        "token_indices": token_indices,
-                        "averages": {k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in averages.items() if not k.endswith("_activation")},
-                    }
-
                 accumulated_data.append(data[data_idx])
                 processed_indices.add(data_idx)
                 if len(processed_indices) % max(1, args.flush_every) == 0:
@@ -420,10 +377,6 @@ def main():
             # On any error, proceed to next batch
             print(f"Error processing batch starting at {batch_idx}: {e}")
         finally:
-            try:
-                capture_handle.remove()
-            except Exception:
-                pass
             try:
                 if steering_handle is not None:
                     steering_handle.remove()
