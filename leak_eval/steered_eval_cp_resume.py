@@ -150,11 +150,36 @@ def parse_args():
     p.add_argument("--resume", action="store_true")
     p.add_argument("--flush_every", type=int, default=1)
     p.add_argument("--seed", type=int, default=221097)
-    # Steering
-    p.add_argument("--steering_layer", type=int, required=True, help="Layer index to steer (e.g., 25)")
-    p.add_argument("--steering_vector_path", type=str, required=True, help="Path to steering vector .npy")
+    # Steering (single-layer, legacy)
+    p.add_argument("--steering_layer", type=int, required=False, help="Layer index to steer (e.g., 25)")
+    p.add_argument("--steering_vector_path", type=str, required=False, help="Path to steering vector .npy")
     p.add_argument("--steering_strength", type=float, default=1.0)
     p.add_argument("--steering_method", type=str, default="add", choices=["add", "replace"])
+    # Steering (multi-layer)
+    p.add_argument(
+        "--steering_layers",
+        type=str,
+        default=None,
+        help="Comma-separated layer indices to steer (overrides --steering_layer)",
+    )
+    p.add_argument(
+        "--steering_vector_paths",
+        type=str,
+        default=None,
+        help="Comma-separated vector paths aligned with --steering_layers",
+    )
+    p.add_argument(
+        "--steering_strengths",
+        type=str,
+        default=None,
+        help="Comma-separated strengths aligned with --steering_layers (defaults to --steering_strength)",
+    )
+    p.add_argument(
+        "--steering_vector_dir",
+        type=str,
+        default=None,
+        help="Directory with steering_vector_layer_{L}.npy (used if --steering_vector_paths not provided)",
+    )
     return p.parse_args()
 
 
@@ -290,9 +315,58 @@ def main():
     else:
         accumulated_data = []
 
-    # Load steering
-    steering_vector = load_steering_vector(args.steering_vector_path)
-    steering_layer = int(args.steering_layer)
+    # Prepare steering configuration (single or multi-layer)
+    multi_layers = None
+    multi_vectors = None
+    multi_strengths = None
+    multi_paths = None
+
+    if args.steering_layers is not None:
+        # Parse multi-layer configuration
+        try:
+            multi_layers = [int(x.strip()) for x in args.steering_layers.split(',') if x.strip()]
+        except Exception:
+            raise ValueError("Invalid --steering_layers; provide comma-separated integers, e.g., '28,47' ")
+
+        # Strengths
+        if args.steering_strengths is not None:
+            try:
+                multi_strengths = [float(x.strip()) for x in args.steering_strengths.split(',') if x.strip()]
+            except Exception:
+                raise ValueError("Invalid --steering_strengths; provide comma-separated floats")
+            if len(multi_strengths) == 1 and len(multi_layers) > 1:
+                multi_strengths = multi_strengths * len(multi_layers)
+            if len(multi_strengths) != len(multi_layers):
+                raise ValueError("--steering_strengths length must match --steering_layers length")
+        else:
+            multi_strengths = [float(args.steering_strength)] * len(multi_layers)
+
+        # Vector paths
+        if args.steering_vector_paths is not None:
+            multi_paths = [x.strip() for x in args.steering_vector_paths.split(',') if x.strip()]
+            if len(multi_paths) != len(multi_layers):
+                raise ValueError("--steering_vector_paths length must match --steering_layers length")
+        else:
+            if not args.steering_vector_dir:
+                raise ValueError("Provide --steering_vector_paths or --steering_vector_dir when using --steering_layers")
+            base_dir = args.steering_vector_dir
+            multi_paths = [os.path.join(base_dir, f"steering_vector_layer_{L}.npy") for L in multi_layers]
+
+        # Load vectors
+        multi_vectors = []
+        for pth in multi_paths:
+            vec = load_steering_vector(pth)
+            if vec is None:
+                raise FileNotFoundError(f"Steering vector not found or invalid: {pth}")
+            multi_vectors.append(vec)
+    else:
+        # Legacy single-layer path (backward compatible)
+        if args.steering_layer is None or args.steering_vector_path is None:
+            raise ValueError("Either provide --steering_layers (multi) or both --steering_layer and --steering_vector_path (single)")
+        steering_layer = int(args.steering_layer)
+        steering_vector = load_steering_vector(args.steering_vector_path)
+        if steering_vector is None:
+            raise FileNotFoundError(f"Steering vector not found or invalid: {args.steering_vector_path}")
 
     total_batches = (len(prompts) + args.batch_size - 1) // args.batch_size
     for batch_idx in range(0, len(prompts), args.batch_size):
@@ -301,12 +375,22 @@ def main():
         batch_texts = prepare_batch_prompts(batch_prompts, tokenizer)
 
         try:
-            # Steering hook only (no activation capture)
-            steering_handle = None
-            if steering_vector is not None:
-                steering_handle = model.model.layers[steering_layer].register_forward_hook(
+            # Steering hooks (no activation capture)
+            steering_handles = []
+            if multi_layers is not None:
+                for L, vec, strength in zip(multi_layers, multi_vectors, multi_strengths):
+                    if 0 <= L < len(model.model.layers):
+                        h = model.model.layers[L].register_forward_hook(
+                            create_steering_hook(vec, strength, args.steering_method)
+                        )
+                        steering_handles.append(h)
+                    else:
+                        print(f"[WARN] Steering layer {L} out of range; skipping")
+            else:
+                h = model.model.layers[steering_layer].register_forward_hook(
                     create_steering_hook(steering_vector, args.steering_strength, args.steering_method)
                 )
+                steering_handles.append(h)
 
             # Tokenize & generate
             inputs = tokenizer(
@@ -378,8 +462,11 @@ def main():
             print(f"Error processing batch starting at {batch_idx}: {e}")
         finally:
             try:
-                if steering_handle is not None:
-                    steering_handle.remove()
+                for h in steering_handles:
+                    try:
+                        h.remove()
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -426,12 +513,21 @@ def main():
         "avg_answer_length": avg_answer_length,
         "avg_close_think_tokens": avg_close_think_tokens,
         "max_close_think_tokens": max_close_think_tokens,
-        "steering": {
-            "layer": steering_layer,
-            "vector_path": args.steering_vector_path,
-            "strength": args.steering_strength,
-            "method": args.steering_method,
-        },
+        "steering": (
+            {
+                "layers": multi_layers,
+                "vector_paths": multi_paths,
+                "strengths": multi_strengths,
+                "method": args.steering_method,
+            }
+            if multi_layers is not None
+            else {
+                "layer": steering_layer,
+                "vector_path": args.steering_vector_path,
+                "strength": args.steering_strength,
+                "method": args.steering_method,
+            }
+        ),
     }
     if getattr(args, "enable_gpt_eval", False):
         summary["pii_leakage"] = pii_leakage
