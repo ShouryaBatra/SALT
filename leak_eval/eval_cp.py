@@ -21,6 +21,27 @@ from rich.panel import Panel
 from rich.table import Table
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+<<<<<<< Updated upstream
+=======
+# --- Gemma and other system-role-less model compatibility ---
+def safe_apply_chat_template(tokenizer, messages, tokenize=False):
+    """
+    Calls tokenizer.apply_chat_template() but strips unsupported roles (like 'system')
+    for models that do not define them (e.g. Gemma).
+    """
+    try:
+        return tokenizer.apply_chat_template(messages, tokenize=tokenize)
+    except Exception as e:
+        if "System role not supported" in str(e) or "system" in str(e).lower():
+            # Remove system role and retry
+            filtered = [m for m in messages if m.get("role") != "system"]
+            return tokenizer.apply_chat_template(filtered, tokenize=tokenize)
+        else:
+            raise
+# ----------------------------------------------------------------
+
+
+>>>>>>> Stashed changes
 # Global debug switch (set from --debug_logs)
 DEBUG_LOGS = False
 
@@ -308,20 +329,30 @@ def get_optimal_batch_size():
     except:
         return 4  # Safe default
 
-def prepare_batch_prompts(prompts, tokenizer):
-    """Convert prompt structures to formatted text for batch processing"""
+def prepare_batch_prompts(batch_prompts, tokenizer, is_gemma=False):
     batch_texts = []
-    for prompt in prompts:
-        if hasattr(tokenizer, "apply_chat_template"):
-            prompt_text = tokenizer.apply_chat_template(
-                prompt,
-                tokenize=False,
-                add_generation_prompt=True
-            )
+    for conv in batch_prompts:
+        if is_gemma==True:
+            # merge system content manually
+            system_msgs = [m["content"] for m in conv if m.get("role") == "system"]
+            system_text = "\n".join(system_msgs).strip()
+            new_conv = []
+            for m in conv:
+                if m["role"] == "user" and system_text:
+                    merged_user = {
+                        "role": "user",
+                        "content": system_text + "\n\n" + m["content"]
+                    }
+                    new_conv.append(merged_user)
+                    system_text = ""
+                elif m["role"] != "system":
+                    new_conv.append(m)
+            prompt_text = tokenizer.apply_chat_template(new_conv, tokenize=False)
         else:
-            prompt_text = prompt if isinstance(prompt, str) else prompt[0]["content"]
+            prompt_text = tokenizer.apply_chat_template(conv, tokenize=False)
         batch_texts.append(prompt_text)
     return batch_texts
+
 
 def generate_batch_with_multilayer_activations(model, tokenizer, batch_texts, args, target_layers):
     """Generate a batch of outputs while capturing activations from multiple layers"""
@@ -569,6 +600,9 @@ def main():
             "<think>", "<|im_start|>think"
         ).replace("</think>", "<|im_start|>answer")
         print("Reformatted prompt for s1 models", sys_prompt_template)
+
+    elif "gemma" in args.model.lower():
+        is_gemma = True
     
     else:
         start_think_token = None
@@ -730,6 +764,40 @@ def main():
     else:
         accumulated_data = []
     
+    # --- Resume skipping logic ---
+    if args.resume and os.path.exists(args.output_file):
+        with open(args.output_file, "r") as f:
+            try:
+                existing = json.load(f)
+                processed_ids = {item["id"] for item in existing.get("data", existing)}
+            except Exception:
+                processed_ids = set()
+    else:
+        processed_ids = set()
+    # --------------------------------
+    
+    # Resume support: load existing result file if requested
+    processed_indices = set()
+    if args.resume and os.path.exists(args.output_file):
+        try:
+            with open(args.output_file, "r") as f:
+                prev = json.load(f)
+            prev_data = prev.get("data", [])
+            # Mark already processed indices (by stored example_id or id)
+            for item in prev_data:
+                if "example_id" in item:
+                    processed_indices.add(item["example_id"])
+                elif "id" in item:
+                    processed_indices.add(item["id"])
+            print(f"Resuming: found {len(processed_indices)} processed examples in {args.output_file}")
+            # When resuming, we will append; keep previous structure
+            accumulated_data = prev_data
+        except Exception:
+            print("Resume requested but failed to read/parse existing output. Starting fresh.")
+            accumulated_data = []
+    else:
+        accumulated_data = []
+    
     # Process prompts in batches
     total_batches = (len(prompts) + args.batch_size - 1) // args.batch_size
     print(f"Processing {len(prompts)} prompts in {total_batches} batches of size {args.batch_size}")
@@ -740,10 +808,17 @@ def main():
         batch_indices = valid_indices[batch_idx:batch_end]
         
         current_batch_num = batch_idx // args.batch_size + 1
+        
+        # Check if all items in this batch are already processed
+        all_processed = all(idx in processed_indices for idx in batch_indices)
+        if all_processed:
+            print(f"Skipping batch {current_batch_num}/{total_batches} - all examples already processed")
+            continue
+        
         print(f"Processing batch {current_batch_num}/{total_batches} ({len(batch_prompts)} prompts)...")
         
         # Prepare batch texts
-        batch_texts = prepare_batch_prompts(batch_prompts, tokenizer)
+        batch_texts = prepare_batch_prompts(batch_prompts, tokenizer, is_gemma=is_gemma)
         
         # Generate batch with multi-layer activations
         try:
@@ -759,6 +834,10 @@ def main():
                 data_idx = valid_indices[idx_in_batch]
                 if data_idx in processed_indices:
                     # Skip already processed
+<<<<<<< Updated upstream
+=======
+                    print(f"Skipping already processed example {data_idx}")
+>>>>>>> Stashed changes
                     continue
                 prompt_text = batch_texts[i]
                 
@@ -777,6 +856,10 @@ def main():
                 else:
                     data[data_idx]["close_think_tokens"] = [0]
                 data[data_idx]["example_id"] = data_idx
+<<<<<<< Updated upstream
+=======
+                data[data_idx]["id"] = data_idx
+>>>>>>> Stashed changes
 
                 # Get cleaned sequence for token indexing
                 if hasattr(generate_batch_with_multilayer_activations, 'cleaned_sequences'):
@@ -847,6 +930,11 @@ def main():
             for i, prompt in enumerate(batch_prompts):
                 idx_in_batch = batch_idx + i
                 data_idx = valid_indices[idx_in_batch]
+                
+                # Skip already processed examples before generation
+                if data_idx in processed_indices:
+                    print(f"Skipping already processed example {data_idx}")
+                    continue
                 
                 if hasattr(tokenizer, "apply_chat_template"):
                     prompt_text = tokenizer.apply_chat_template(
@@ -929,6 +1017,10 @@ def main():
                     else:
                         data[data_idx]["close_think_tokens"] = [0]
                     data[data_idx]["example_id"] = data_idx
+<<<<<<< Updated upstream
+=======
+                    data[data_idx]["id"] = data_idx
+>>>>>>> Stashed changes
                     
                     token_indices = find_special_token_indices(tokenizer, clean_complete_seq, start_think_token, end_think_token)
                     
