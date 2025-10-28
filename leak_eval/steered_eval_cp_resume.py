@@ -28,6 +28,22 @@ from cp_eval_utils import (
 )
 from generate_utils import get_provider_model_name
 
+# --- Gemma and other system-role-less model compatibility ---
+def safe_apply_chat_template(tokenizer, messages, tokenize=False):
+    """
+    Calls tokenizer.apply_chat_template() but strips unsupported roles (like 'system')
+    for models that do not define them (e.g. Gemma).
+    """
+    try:
+        return tokenizer.apply_chat_template(messages, tokenize=tokenize)
+    except Exception as e:
+        if "System role not supported" in str(e) or "system" in str(e).lower():
+            filtered = [m for m in messages if m.get("role") != "system"]
+            return tokenizer.apply_chat_template(filtered, tokenize=tokenize)
+        else:
+            raise
+# ----------------------------------------------------------------
+
 
 def clean_repeated_input(tokenizer, input_ids, output_ids):
     try:
@@ -204,13 +220,26 @@ def get_optimal_batch_size():
         return 4
 
 
-def prepare_batch_prompts(prompts, tokenizer):
+def prepare_batch_prompts(prompts, tokenizer, is_gemma=False):
     batch_texts = []
-    for prompt in prompts:
-        if hasattr(tokenizer, "apply_chat_template"):
-            text = tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+    for conv in prompts:
+        if is_gemma:
+            system_msgs = [m["content"] for m in conv if m.get("role") == "system"]
+            system_text = "\n".join(system_msgs).strip()
+            new_conv = []
+            for m in conv:
+                if m["role"] == "user" and system_text:
+                    merged_user = {
+                        "role": "user",
+                        "content": system_text + "\n\n" + m["content"],
+                    }
+                    new_conv.append(merged_user)
+                    system_text = ""
+                elif m["role"] != "system":
+                    new_conv.append(m)
+            text = tokenizer.apply_chat_template(new_conv, tokenize=False)
         else:
-            text = prompt if isinstance(prompt, str) else prompt[0]["content"]
+            text = tokenizer.apply_chat_template(conv, tokenize=False)
         batch_texts.append(text)
     return batch_texts
 
@@ -232,25 +261,51 @@ def main():
     with open(prompt_file, "r") as f:
         sys_prompt_template = f.read()
 
-    if ("deepseek" in args.model.lower()) or ("qwq" in args.model.lower()) or ("cot" in args.prompt_type):
+    # Determine special tokens and model quirks
+    is_gemma = False
+    if (
+        ("deepseek" in args.model.lower())
+        or ("qwq" in args.model.lower())
+        or ("cot" in args.prompt_type)
+    ):
         start_think_token = "<think>"
         end_think_token = "</think>"
     elif "nemotron" in args.model.lower():
-        start_think_token = "<think>"
-        end_think_token = "</think>"
+        if "reasoning" in args.prompt_type:
+            start_think_token = "<think>"
+            end_think_token = "</think>"
+        else:
+            start_think_token = None
+            end_think_token = None
     elif "s1" in args.model.lower():
         start_think_token = "<|im_start|>think"
         end_think_token = "<|im_start|>answer"
         sys_prompt_template = sys_prompt_template.replace("<think>", "<|im_start|>think").replace("</think>", "<|im_start|>answer")
+    elif "gemma" in args.model.lower():
+        start_think_token = None
+        end_think_token = None
+        is_gemma = True
     else:
         start_think_token = None
         end_think_token = None
 
-    prompts = []
-    valid_indices = []
+    # Situation template
     situation_prompt_file = os.path.join("./prompts/cp_open_ended_chat/situation_template.txt")
     with open(situation_prompt_file, "r") as f:
         situation_prompt = f.read()
+
+    # Prompt injection support
+    if args.prompt_inj:
+        try:
+            with open(args.prompt_inj, "r") as f:
+                injection = f.readline().strip()
+        except FileNotFoundError:
+            injection = None
+    else:
+        injection = None
+
+    prompts = []
+    valid_indices = []
 
     scenario_to_description = {
         "visit_social_worker": "Visit social worker: Answer a social worker's questions about depression before the visit.",
@@ -275,11 +330,17 @@ def main():
                 privacy_directive=item.get("privacy_directive", ""),
                 question=question,
             )
+            formatted_situation_prompt = (
+                formatted_situation_prompt + f" {injection}" if injection else formatted_situation_prompt
+            )
             data[i]["formatted_situation_prompt"] = formatted_situation_prompt
             prompt = [
                 {"role": "system", "content": formatted_sys_prompt},
                 {"role": "user", "content": formatted_situation_prompt},
             ]
+            if "nemotron" in args.model.lower():
+                thinking = "on" if "reasoning" in args.prompt_type else "off"
+                prompt.insert(0, {"role": "system", "content": f"detailed thinking {thinking}"})
             if "cot" in args.prompt_type:
                 prompt.append({"role": "assistant", "content": "<think> Let's think step by step."})
             prompts.append(prompt)
@@ -372,7 +433,7 @@ def main():
     for batch_idx in range(0, len(prompts), args.batch_size):
         batch_end = min(batch_idx + args.batch_size, len(prompts))
         batch_prompts = prompts[batch_idx:batch_end]
-        batch_texts = prepare_batch_prompts(batch_prompts, tokenizer)
+        batch_texts = prepare_batch_prompts(batch_prompts, tokenizer, is_gemma=is_gemma)
 
         try:
             # Steering hooks (no activation capture)
@@ -444,6 +505,7 @@ def main():
                 data[data_idx]["answer_token_length"] = [len(tokenizer.encode(answer))]
                 data[data_idx]["close_think_tokens"] = [output_text.count(end_think_token)] if end_think_token else [0]
                 data[data_idx]["example_id"] = data_idx
+                data[data_idx]["id"] = data_idx
 
                 accumulated_data.append(data[data_idx])
                 processed_indices.add(data_idx)
