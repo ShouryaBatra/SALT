@@ -237,9 +237,9 @@ def prepare_batch_prompts(prompts, tokenizer, is_gemma=False):
                     system_text = ""
                 elif m["role"] != "system":
                     new_conv.append(m)
-            text = tokenizer.apply_chat_template(new_conv, tokenize=False)
+            text = safe_apply_chat_template(tokenizer, new_conv, tokenize=False)
         else:
-            text = tokenizer.apply_chat_template(conv, tokenize=False)
+            text = safe_apply_chat_template(tokenizer, conv, tokenize=False)
         batch_texts.append(text)
     return batch_texts
 
