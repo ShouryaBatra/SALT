@@ -29,6 +29,7 @@ def main() -> None:
     parser.add_argument("--strengths", required=True, help="Comma-separated strengths to sweep")
     parser.add_argument("--vector_dir", required=True, help="Directory with steering_vector_layer_{L}.npy")
     parser.add_argument("--steering_method", type=str, default="add", choices=["add", "replace"]) 
+    parser.add_argument("--steer_only_last_input", action="store_true")
 
     args = parser.parse_args()
 
@@ -80,6 +81,8 @@ def main() -> None:
             "--steering_vector_dir", str(vector_dir),
             "--steering_method", args.steering_method,
         ]
+        if args.steer_only_last_input:
+            cmd.append("--steer_only_last_input")
         if args.enable_gpt_eval:
             cmd.append("--enable_gpt_eval")
         if args.gpt_eval:

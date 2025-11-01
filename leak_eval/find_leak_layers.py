@@ -2,7 +2,7 @@ import argparse
 import glob
 import json
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -52,13 +52,14 @@ def load_labels_from_results(results_json_path: str) -> Dict[int, int]:
     return labels
 
 
-def pick_activation_vector(npz_obj: np.lib.npyio.NpzFile, segment: str) -> np.ndarray:
+def pick_activation_vector(npz_obj: np.lib.npyio.NpzFile, segment: str, input_len: Optional[int] = None) -> np.ndarray:
     """Select a 1D activation vector from an activation .npz entry.
 
     Priority by segment:
       - reasoning_avg:  reasoning_avg_activation -> fallback to full_avg_activation -> activation.mean(axis=0)
       - full_avg:       full_avg_activation      -> fallback to activation.mean(axis=0)
       - answer_avg:     answer_avg_activation    -> fallback to full_avg_activation -> activation.mean(axis=0)
+      - last_input:     activation[input_len-1]  -> fallback to activation.mean(axis=0) if not 2D
     """
     def ensure_1d(arr: np.ndarray) -> np.ndarray:
         if arr.ndim == 1:
@@ -72,6 +73,42 @@ def pick_activation_vector(npz_obj: np.lib.npyio.NpzFile, segment: str) -> np.nd
             reshaped = arr.reshape(-1, arr.shape[-1])
             return reshaped.mean(axis=0)
         return arr
+
+    if segment == "last_input":
+        # Prefer precomputed 1D last-input vector if present
+        if "last_input" in npz_obj:
+            arr = npz_obj["last_input"]  # type: ignore[index]
+            if isinstance(arr, np.ndarray) and arr.ndim == 1:
+                return arr
+            return ensure_1d(arr)
+        # Prefer using the raw per-token activation and index the last input token
+        if "activation" in npz_obj:
+            arr = npz_obj["activation"]  # type: ignore[index]
+            if isinstance(arr, np.ndarray) and arr.ndim == 2:
+                if input_len is None:
+                    raise ValueError("input_len is required for segment='last_input'")
+                seq_len = arr.shape[0]
+                idx = max(0, min(int(input_len) - 1, seq_len - 1))
+                return arr[idx]
+            if isinstance(arr, np.ndarray) and arr.ndim == 1:
+                # Already a 1D vector; use as-is
+                return arr
+        # Fallback: try any key that is 2D
+        for key in list(npz_obj.keys()):
+            try:
+                arr2 = npz_obj[key]  # type: ignore[index]
+            except Exception:
+                continue
+            if isinstance(arr2, np.ndarray) and arr2.ndim == 2:
+                if input_len is None:
+                    raise ValueError("input_len is required for segment='last_input'")
+                seq_len = arr2.shape[0]
+                idx = max(0, min(int(input_len) - 1, seq_len - 1))
+                return arr2[idx]
+        # As a last resort, average
+        if "activation" in npz_obj:
+            return ensure_1d(npz_obj["activation"])  # type: ignore[index]
+        raise ValueError("Could not locate a suitable per-token activation for last_input")
 
     if segment == "reasoning_avg":
         if "reasoning_avg_activation" in npz_obj:
@@ -125,6 +162,7 @@ def compute_effects(pos_matrix: np.ndarray, neg_matrix: np.ndarray) -> Tuple[np.
 def analyze_layers(
     activations_dir: str,
     labels: Dict[int, int],
+    input_lengths: Dict[int, int],
     segment: str,
     threshold: float,
     min_examples: int,
@@ -174,7 +212,13 @@ def analyze_layers(
 
         vec = None
         try:
-            vec = pick_activation_vector(npz, segment)
+            if segment == "last_input":
+                in_len = input_lengths.get(example_id)
+                if in_len is None:
+                    continue
+                vec = pick_activation_vector(npz, segment, input_len=in_len)
+            else:
+                vec = pick_activation_vector(npz, segment)
         except Exception:
             continue
 
@@ -318,6 +362,7 @@ def save_outputs(
 def collect_layer_vectors(
     activations_dir: str,
     labels: Dict[int, int],
+    input_lengths: Dict[int, int],
     segment: str,
 ) -> Tuple[Dict[int, List[np.ndarray]], Dict[int, List[np.ndarray]], Dict[int, int]]:
     """Load activation vectors per layer, split into leaky/non-leaky groups, and record hidden dims.
@@ -332,7 +377,48 @@ def collect_layer_vectors(
     by_layer_neg: Dict[int, List[np.ndarray]] = {}
     hidden_dim_by_layer: Dict[int, int] = {}
 
+    print(f"[find_leak_layers] Scanning {len(npz_paths)} files in '{activations_dir}' (segment='{segment}')")
+    processed = 0
+    used = 0
+    skipped_no_meta = 0
+    skipped_no_input_len = 0
+    skipped_bad_vec = 0
+
     for path in npz_paths:
+        # Fast path: if segment is last_input and a sidecar 1D vector exists, use it without opening the .npz
+        if segment == "last_input":
+            sidecar = path + ".last_input.npy"
+            if os.path.exists(sidecar):
+                # Parse layer/example from filename; fallback to npz if parsing fails
+                base = os.path.basename(path).replace(".npz", "")
+                try:
+                    parts = base.split("_")
+                    layer_idx = int(parts[1])
+                    example_id = int(parts[3])
+                except Exception:
+                    layer_idx = None
+                    example_id = None
+                if layer_idx is not None and example_id is not None:
+                    try:
+                        vec = np.load(sidecar)
+                        if isinstance(vec, np.ndarray) and vec.ndim == 1 and vec.size > 0:
+                            hidden_dim_by_layer[layer_idx] = int(vec.shape[0])
+                            label = labels.get(example_id, 0)
+                            if label == 1:
+                                by_layer_pos.setdefault(layer_idx, []).append(vec)
+                            else:
+                                by_layer_neg.setdefault(layer_idx, []).append(vec)
+                            used += 1
+                            processed += 1
+                            if processed % 1000 == 0:
+                                print(
+                                    f"[find_leak_layers] Processed {processed}/{len(npz_paths)} | used={used} | "
+                                    f"skipped(no_meta={skipped_no_meta}, no_in_len={skipped_no_input_len}, bad_vec={skipped_bad_vec})"
+                                )
+                            continue
+                    except Exception:
+                        # Fall back to normal npz loading below
+                        pass
         try:
             npz = np.load(path, allow_pickle=True)
         except Exception:
@@ -352,13 +438,24 @@ def collect_layer_vectors(
                 layer_idx = int(parts[1])
                 example_id = int(parts[3])
             except Exception:
+                skipped_no_meta += 1
                 continue
 
         try:
-            vec = pick_activation_vector(npz, segment)
+            if segment == "last_input":
+                in_len = input_lengths.get(example_id)
+                if in_len is None:
+                    skipped_no_input_len += 1
+                    continue
+                vec = pick_activation_vector(npz, segment, input_len=in_len)
+            else:
+                vec = pick_activation_vector(npz, segment)
         except Exception:
+            skipped_bad_vec += 1
             continue
+
         if vec is None or vec.size == 0:
+            skipped_bad_vec += 1
             continue
 
         hidden_dim_by_layer[layer_idx] = int(vec.shape[0])
@@ -368,7 +465,44 @@ def collect_layer_vectors(
         else:
             by_layer_neg.setdefault(layer_idx, []).append(vec)
 
+        used += 1
+        processed += 1
+        if processed % 1000 == 0:
+            print(
+                f"[find_leak_layers] Processed {processed}/{len(npz_paths)} | used={used} | "
+                f"skipped(no_meta={skipped_no_meta}, no_in_len={skipped_no_input_len}, bad_vec={skipped_bad_vec})"
+            )
+
+    print(
+        f"[find_leak_layers] Done scanning: used={used}, "
+        f"skipped(no_meta={skipped_no_meta}, no_in_len={skipped_no_input_len}, bad_vec={skipped_bad_vec})"
+    )
+    print(f"[find_leak_layers] Layers with any vectors: {len(hidden_dim_by_layer)}")
+
     return by_layer_pos, by_layer_neg, hidden_dim_by_layer
+
+def load_input_lengths_from_results(results_json_path: str) -> Dict[int, int]:
+    """Load per-example input token lengths from a results JSON file.
+
+    Returns a dict mapping example_id -> input_token_length.
+    """
+    with open(results_json_path, "r") as f:
+        results = json.load(f)
+
+    data = results.get("data", results)
+    input_lengths: Dict[int, int] = {}
+    for idx, item in enumerate(data):
+        try:
+            example_id = int(item.get("example_id", item.get("id", idx)))
+        except Exception:
+            example_id = idx
+        in_len = item.get("input_token_length")
+        if in_len is not None:
+            try:
+                input_lengths[example_id] = int(in_len)
+            except Exception:
+                pass
+    return input_lengths
 
 
 def compute_layer_effects_once(
@@ -494,8 +628,8 @@ def main():
         "--segment",
         type=str,
         default="reasoning_avg",
-        choices=["reasoning_avg", "full_avg", "answer_avg"],
-        help="Which averaged activation to use per example",
+        choices=["reasoning_avg", "full_avg", "answer_avg", "last_input"],
+        help="Which representation to use per example (averages or last_input token)",
     )
     parser.add_argument("--threshold", type=float, default=4.0, help="Threshold on |Cohen's d| to flag neurons")
     parser.add_argument("--thresholds", nargs='+', type=float, help="Multiple thresholds for |Cohen's d|; overrides --threshold")
@@ -513,20 +647,48 @@ def main():
 
     args = parser.parse_args()
 
+    print(
+        f"[find_leak_layers] Starting with:\n"
+        f"  activations_dir: {args.activations_dir}\n"
+        f"  results_json:    {args.results_json}\n"
+        f"  segment:         {args.segment}\n"
+        f"  thresholds:      {args.thresholds if args.thresholds else [args.threshold]}\n"
+        f"  min_examples:    {args.min_examples}\n"
+        f"  output_dir:      {args.output_dir}\n"
+        f"  save_vectors:    {args.save_vectors} ({args.vector_kind}, top_k={args.top_k_dims})"
+    )
+
+    # Create output dir early so users can see progress
+    try:
+        os.makedirs(args.output_dir, exist_ok=True)
+    except Exception:
+        pass
+
     labels = load_labels_from_results(args.results_json)
+    input_lengths = load_input_lengths_from_results(args.results_json)
+    print(f"[find_leak_layers] Loaded {len(labels)} labels and {len(input_lengths)} input lengths")
 
     # Collect vectors once and compute effects once
+    print("[find_leak_layers] Collecting vectors...")
     by_layer_pos, by_layer_neg, hidden_dim_by_layer = collect_layer_vectors(
         activations_dir=args.activations_dir,
         labels=labels,
+        input_lengths=input_lengths,
         segment=args.segment,
     )
+    total_layers = len(hidden_dim_by_layer)
+    total_pos = sum(len(v) for v in by_layer_pos.values())
+    total_neg = sum(len(v) for v in by_layer_neg.values())
+    print(f"[find_leak_layers] Collection done: layers={total_layers}, pos={total_pos}, neg={total_neg}")
+
+    print("[find_leak_layers] Computing effects...")
     base_rows, vectors = compute_layer_effects_once(
         by_layer_pos=by_layer_pos,
         by_layer_neg=by_layer_neg,
         hidden_dim_by_layer=hidden_dim_by_layer,
         min_examples=args.min_examples,
     )
+    print(f"[find_leak_layers] Effects computed for {len(base_rows)} layers (min_examples={args.min_examples})")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -535,8 +697,10 @@ def main():
 
     # Save per-threshold CSV/JSON/plot without recomputing neurons
     for thr in thresholds:
+        print(f"[find_leak_layers] Writing outputs for threshold {thr}...")
         thr_rows = rows_for_threshold(base_rows, vectors, thr)
         save_csv_json_plot(thr_rows, args.output_dir, thr)
+    print(f"[find_leak_layers] Outputs saved to {args.output_dir}")
 
     # Optionally save steering vectors once
     if args.save_vectors:
@@ -557,6 +721,7 @@ def main():
                 vec_to_save = vec_to_save / norm
             out_path = os.path.join(vectors_dir, f"steering_vector_layer_{layer}.npy")
             np.save(out_path, vec_to_save)
+        print(f"[find_leak_layers] Steering vectors saved to {vectors_dir}")
 
     # Print top few layers for the first threshold (if any)
     if thresholds:

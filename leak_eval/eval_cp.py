@@ -21,8 +21,6 @@ from rich.panel import Panel
 from rich.table import Table
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-<<<<<<< Updated upstream
-=======
 # --- Gemma and other system-role-less model compatibility ---
 def safe_apply_chat_template(tokenizer, messages, tokenize=False):
     """
@@ -41,7 +39,6 @@ def safe_apply_chat_template(tokenizer, messages, tokenize=False):
 # ----------------------------------------------------------------
 
 
->>>>>>> Stashed changes
 # Global debug switch (set from --debug_logs)
 DEBUG_LOGS = False
 
@@ -577,6 +574,9 @@ def main():
         except FileNotFoundError:
             print(f"Error: Prompt file {prompt_file} not found")
             return
+    # Ensure is_gemma is defined for all code paths
+    is_gemma = False
+
     if (
     "deepseek" in args.model.lower()
     or "qwq" in args.model.lower()
@@ -744,25 +744,6 @@ def main():
 
     # ---- Multi-Layer Batch Processing with Activation Extraction ------
     all_outputs = []
-    # Resume support: load existing result file if requested
-    processed_indices = set()
-    if args.resume and os.path.exists(args.output_file):
-        try:
-            with open(args.output_file, "r") as f:
-                prev = json.load(f)
-            prev_data = prev.get("data", [])
-            # Mark already processed indices (by stored example_id)
-            for item in prev_data:
-                if "example_id" in item:
-                    processed_indices.add(item["example_id"]) 
-            print(f"Resuming: found {len(processed_indices)} processed examples in {args.output_file}")
-            # When resuming, we will append; keep previous structure
-            accumulated_data = prev_data
-        except Exception:
-            print("Resume requested but failed to read/parse existing output. Starting fresh.")
-            accumulated_data = []
-    else:
-        accumulated_data = []
     
     # --- Resume skipping logic ---
     if args.resume and os.path.exists(args.output_file):
@@ -834,10 +815,7 @@ def main():
                 data_idx = valid_indices[idx_in_batch]
                 if data_idx in processed_indices:
                     # Skip already processed
-<<<<<<< Updated upstream
-=======
                     print(f"Skipping already processed example {data_idx}")
->>>>>>> Stashed changes
                     continue
                 prompt_text = batch_texts[i]
                 
@@ -856,10 +834,7 @@ def main():
                 else:
                     data[data_idx]["close_think_tokens"] = [0]
                 data[data_idx]["example_id"] = data_idx
-<<<<<<< Updated upstream
-=======
                 data[data_idx]["id"] = data_idx
->>>>>>> Stashed changes
 
                 # Get cleaned sequence for token indexing
                 if hasattr(generate_batch_with_multilayer_activations, 'cleaned_sequences'):
@@ -1000,9 +975,6 @@ def main():
                     output_text = tokenizer.decode(clean_generated_ids, skip_special_tokens=True)
                     all_outputs.append(output_text)
                     
-                    if data_idx in processed_indices:
-                        # Skip already processed
-                        continue
                     data[data_idx]["model_output"] = [output_text]
                     reasoning, answer = split_by_think(output_text, end_think_token)
                     data[data_idx]["model_reasoning"] = [reasoning]
@@ -1017,10 +989,7 @@ def main():
                     else:
                         data[data_idx]["close_think_tokens"] = [0]
                     data[data_idx]["example_id"] = data_idx
-<<<<<<< Updated upstream
-=======
                     data[data_idx]["id"] = data_idx
->>>>>>> Stashed changes
                     
                     token_indices = find_special_token_indices(tokenizer, clean_complete_seq, start_think_token, end_think_token)
                     

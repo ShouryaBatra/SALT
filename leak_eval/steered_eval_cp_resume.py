@@ -122,7 +122,7 @@ def load_steering_vector(path):
     return None
 
 
-def create_steering_hook(steering_vector, steering_strength, steering_method="add"):
+def create_steering_hook(steering_vector, steering_strength, steering_method="add", last_token_indices=None):
     def steering_hook(module, input, output):
         if isinstance(output, tuple):
             activation = output[0]
@@ -134,10 +134,22 @@ def create_steering_hook(steering_vector, steering_strength, steering_method="ad
             steer = steering_vector.to(device=activation.device, dtype=activation.dtype)
             if steer.dim() == 1:
                 steer = steer.unsqueeze(0).unsqueeze(0)
-            if steering_method == "add":
-                activation = activation + steering_strength * steer
-            else:  # replace
-                activation = steering_strength * steer.expand_as(activation)
+            # If last_token_indices is provided, apply only at those token positions per batch item
+            if last_token_indices is not None and activation.dim() == 3 and activation.size(1) > 1:
+                batch_size, seq_len, hidden = activation.size()
+                idx = last_token_indices.to(device=activation.device)
+                idx = torch.clamp(idx, min=0, max=seq_len - 1)
+                row_idx = torch.arange(batch_size, device=activation.device)
+                base_vec = steer.squeeze(0).squeeze(0)
+                if steering_method == "add":
+                    activation[row_idx, idx, :] = activation[row_idx, idx, :] + steering_strength * base_vec
+                else:  # replace
+                    activation[row_idx, idx, :] = (steering_strength * base_vec).expand(batch_size, hidden)
+            else:
+                if steering_method == "add":
+                    activation = activation + steering_strength * steer
+                else:  # replace
+                    activation = steering_strength * steer.expand_as(activation)
         return (activation,) + rest if rest else activation
     return steering_hook
 
@@ -195,6 +207,11 @@ def parse_args():
         type=str,
         default=None,
         help="Directory with steering_vector_layer_{L}.npy (used if --steering_vector_paths not provided)",
+    )
+    p.add_argument(
+        "--steer_only_last_input",
+        action="store_true",
+        help="If set, apply steering only at the last input token per sequence (prefill)",
     )
     return p.parse_args()
 
@@ -436,27 +453,35 @@ def main():
         batch_texts = prepare_batch_prompts(batch_prompts, tokenizer, is_gemma=is_gemma)
 
         try:
+            # Tokenize first to compute last input indices if needed
+            inputs = tokenizer(
+                batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=4096
+            ).to(model.device)
+
+            last_token_indices = None
+            if getattr(args, "steer_only_last_input", False) and "attention_mask" in inputs:
+                try:
+                    last_token_indices = inputs["attention_mask"].sum(dim=1) - 1
+                    last_token_indices = last_token_indices.to(dtype=torch.long)
+                except Exception:
+                    last_token_indices = None
+
             # Steering hooks (no activation capture)
             steering_handles = []
             if multi_layers is not None:
                 for L, vec, strength in zip(multi_layers, multi_vectors, multi_strengths):
                     if 0 <= L < len(model.model.layers):
                         h = model.model.layers[L].register_forward_hook(
-                            create_steering_hook(vec, strength, args.steering_method)
+                            create_steering_hook(vec, strength, args.steering_method, last_token_indices)
                         )
                         steering_handles.append(h)
                     else:
                         print(f"[WARN] Steering layer {L} out of range; skipping")
             else:
                 h = model.model.layers[steering_layer].register_forward_hook(
-                    create_steering_hook(steering_vector, args.steering_strength, args.steering_method)
+                    create_steering_hook(steering_vector, args.steering_strength, args.steering_method, last_token_indices)
                 )
                 steering_handles.append(h)
-
-            # Tokenize & generate
-            inputs = tokenizer(
-                batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=4096
-            ).to(model.device)
             gen_kwargs = {"max_new_tokens": args.max_tokens, "pad_token_id": tokenizer.eos_token_id}
             if args.temperature is not None:
                 gen_kwargs["do_sample"] = True
