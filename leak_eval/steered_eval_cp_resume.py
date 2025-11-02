@@ -299,8 +299,11 @@ def main():
         end_think_token = "<|im_start|>answer"
         sys_prompt_template = sys_prompt_template.replace("<think>", "<|im_start|>think").replace("</think>", "<|im_start|>answer")
     elif "gemma" in args.model.lower():
-        start_think_token = None
-        end_think_token = None
+        # For Gemma, we still want explicit think tags so we can split
+        # reasoning vs answer reliably, even though Gemma does not support
+        # a system role. We handle the system role in prepare_batch_prompts.
+        start_think_token = "<think>"
+        end_think_token = "</think>"
         is_gemma = True
     else:
         start_think_token = None
@@ -369,6 +372,11 @@ def main():
 
     model_name = get_provider_model_name(args.model, args.model_provider)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    # Ensure correct padding side for decoder-only generation
+    try:
+        tokenizer.padding_side = "left"
+    except Exception:
+        pass
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True, torch_dtype="auto", device_map="auto")

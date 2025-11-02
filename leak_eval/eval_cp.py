@@ -602,6 +602,10 @@ def main():
         print("Reformatted prompt for s1 models", sys_prompt_template)
 
     elif "gemma" in args.model.lower():
+        # Use explicit think tags for Gemma so we can split reasoning/answer.
+        # Gemma lacks a system role, which we handle when applying the template.
+        start_think_token = "<think>"
+        end_think_token = "</think>"
         is_gemma = True
     
     else:
@@ -712,6 +716,11 @@ def main():
     model_name = get_provider_model_name(args.model, args.model_provider)
     print(f"Loading model {model_name} from HuggingFace Transformers")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    # Prefer left padding for decoder-only models to align sequences in batch
+    try:
+        tokenizer.padding_side = "left"
+    except Exception:
+        pass
     
     # Set pad token if not present
     if tokenizer.pad_token is None:
