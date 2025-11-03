@@ -40,7 +40,7 @@ fig.update_layout(
     # Title styling
     title=dict(
         text='Flagged Neurons by Layer for QwQ-32B',
-        font=dict(size=18, family='Times New Roman, serif', color='#000000', weight=600),
+        font=dict(size=22, family='Times New Roman, serif', color='#000000', weight=600),
         x=0.5,
         xanchor='center',
         y=0.96,
@@ -51,10 +51,10 @@ fig.update_layout(
     xaxis=dict(
         title=dict(
             text='Layer Index',
-            font=dict(size=16, family='Times New Roman, serif', color='#000000', weight=500),
+            font=dict(size=22, family='Times New Roman, serif', color='#000000', weight=500),
             standoff=15
         ),
-        tickfont=dict(size=13, family='Times New Roman, serif', color='#000000'),
+        tickfont=dict(size=16, family='Times New Roman, serif', color='#000000'),
         showgrid=False,
         showline=True,
         linewidth=2,
@@ -69,10 +69,10 @@ fig.update_layout(
     yaxis=dict(
         title=dict(
             text='Flagged Neurons (|d| ≥ 0.5)',
-            font=dict(size=16, family='Times New Roman, serif', color='#000000', weight=500),
+            font=dict(size=20, family='Times New Roman, serif', color='#000000', weight=500),
             standoff=15
         ),
-        tickfont=dict(size=13, family='Times New Roman, serif', color='#000000'),
+        tickfont=dict(size=16, family='Times New Roman, serif', color='#000000'),
         showgrid=True,
         gridcolor='#D3D3D3',
         gridwidth=0.8,
