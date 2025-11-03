@@ -8,15 +8,15 @@ import numpy as np
 # ==========================================
 # For demonstration, creating sample data
 # Replace with your actual data loading:
-# out_dir = "results/leak_layer_csvs/"
-# df = pd.read_csv(f"{out_dir}/qwq_leak_layer_ranking_thr_0_5.csv").sort_values("layer")
-# layers = df["layer"].to_numpy()
-# counts = df["flagged_count"].to_numpy()
+out_dir = "results/leak_layer_csvs/"
+df = pd.read_csv(f"{out_dir}/qwq_leak_layer_ranking_thr_0_5.csv").sort_values("layer")
+layers = df["layer"].to_numpy()
+counts = df["flagged_count"].to_numpy()
 
 # Sample data (replace this with your actual data)
-np.random.seed(42)
-layers = np.arange(0, 80)
-counts = np.random.poisson(lam=150, size=80) + np.random.randint(50, 200, size=80)
+# np.random.seed(42)
+# layers = np.arange(0, 80)
+# counts = np.random.poisson(lam=150, size=80) + np.random.randint(50, 200, size=80)
 # ==========================================
 
 # Create the figure with professional styling
