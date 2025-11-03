@@ -40,7 +40,7 @@ fig.update_layout(
     # Title styling
     title=dict(
         text='Flagged Neurons by Layer for QwQ-32B',
-        font=dict(size=30, family='Times New Roman, serif', color='#000000', weight=600),
+        font=dict(size=36, family='Times New Roman, serif', color='#000000', weight=600),
         x=0.5,
         xanchor='center',
         y=0.96,
