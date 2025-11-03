@@ -115,16 +115,3 @@ fig.update_yaxes(showticklabels=True)
 fig.write_image('neurips_barplot.pdf', 
                 width=1200, height=450)
 
-
-print("\n" + "="*60)
-print("✓ Professional NeurIPS-style plot created successfully!")
-print("="*60)
-print("\nSaved in multiple formats:")
-print("  📊 PNG (high-res, 300+ DPI): neurips_barplot.png")
-print("  📄 PDF (vector, LaTeX):      neurips_barplot.pdf")
-print("  🎨 SVG (vector, alt):        neurips_barplot.svg")
-print("  🌐 HTML (interactive):       neurips_barplot.html")
-print("\n" + "="*60)
-print("\nFor your LaTeX paper, use:")
-print("  \\includegraphics[width=\\columnwidth]{neurips_barplot.pdf}")
-print("="*60)
