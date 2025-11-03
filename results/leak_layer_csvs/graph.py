@@ -40,7 +40,7 @@ fig.update_layout(
     # Title styling
     title=dict(
         text='Flagged Neurons by Layer for QwQ-32B',
-        font=dict(size=36, family='Times New Roman, serif', color='#000000', weight=600),
+        font=dict(size=30, family='Times New Roman, serif', color='#000000', weight=600),
         x=0.5,
         xanchor='center',
         y=0.96,
@@ -61,6 +61,8 @@ fig.update_layout(
         linecolor='#000000',
         mirror=True,
         ticks='outside',
+        # showlines=False,
+        # showticklabels=True,
         tickwidth=1.5,
         ticklen=6,
         tickcolor='#000000'
@@ -76,7 +78,8 @@ fig.update_layout(
         showgrid=True,
         gridcolor='#D3D3D3',
         gridwidth=0.8,
-        showline=True,
+        showline=False,
+        # showgridlines=False,
         linewidth=2,
         linecolor='#000000',
         mirror=True,
@@ -90,7 +93,7 @@ fig.update_layout(
     ),
     
     # Overall plot styling
-    plot_bgcolor='white',
+    plot_bgcolor='#FFFEF9',
     paper_bgcolor='white',
     width=1200,
     height=450,
@@ -109,9 +112,24 @@ fig.update_layout(
 # Ensure proper axis formatting
 fig.update_xaxes(showticklabels=True)
 fig.update_yaxes(showticklabels=True)
+fig.update_xaxes(mirror=False)  # Removes top border
+fig.update_yaxes(mirror=False)
 
 
 # Save as PDF (vector format - best for LaTeX papers)
 fig.write_image('neurips_barplot.pdf', 
                 width=1200, height=450)
 
+
+print("\n" + "="*60)
+print("✓ Professional NeurIPS-style plot created successfully!")
+print("="*60)
+print("\nSaved in multiple formats:")
+print("  📊 PNG (high-res, 300+ DPI): neurips_barplot.png")
+print("  📄 PDF (vector, LaTeX):      neurips_barplot.pdf")
+print("  🎨 SVG (vector, alt):        neurips_barplot.svg")
+print("  🌐 HTML (interactive):       neurips_barplot.html")
+print("\n" + "="*60)
+print("\nFor your LaTeX paper, use:")
+print("  \\includegraphics[width=\\columnwidth]{neurips_barplot.pdf}")
+print("="*60)
