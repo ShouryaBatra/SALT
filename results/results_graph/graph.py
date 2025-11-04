@@ -19,8 +19,10 @@ def plot_cpl_vanilla_vs_salt() -> None:
     ]
 
     # CPL values (lower is better)
-    vanilla_cpl = [0.385, 0.727, 0.824]
-    salt_cpl = [0.316, 0.595, 0.718]
+    vanilla_cpl = [0.385, 0.727, 0.077]
+    salt_cpl = [0.316, 0.595, 0.053]
+    std_error_vanilla = [0.007, 0.008, 0.004]
+    std_error_salt = [0.008, 0.008, 0.003]
 
     # Two clusters: Vanilla (left) and SALT (right)
     cluster_centers = [0.0, 1.6]
@@ -50,6 +52,10 @@ def plot_cpl_vanilla_vs_salt() -> None:
             vanilla_cpl[i],
             width=single_bar_width * 0.9,
             color=model_colors[i],
+            yerr=std_error_vanilla[i],
+            capsize=5,
+            ecolor="black",
+            error_kw={"elinewidth": 1.2},
         )
         vanilla_rects.extend(rect)
 
@@ -62,6 +68,10 @@ def plot_cpl_vanilla_vs_salt() -> None:
             salt_cpl[i],
             width=single_bar_width * 0.9,
             color=model_colors[i],
+            yerr=std_error_salt[i],
+            capsize=5,
+            ecolor="black",
+            error_kw={"elinewidth": 1.2},
         )
         salt_rects.extend(rect)
 
@@ -87,8 +97,11 @@ def plot_cpl_vanilla_vs_salt() -> None:
                 fontsize=9,
             )
 
-    # Y-axis: cap at the tallest bar to highlight relative improvements
-    y_top = max(max(vanilla_cpl), max(salt_cpl))
+    # Y-axis: cap above the tallest error bar to keep everything visible
+    y_top = max(
+        max([v + e for v, e in zip(vanilla_cpl, std_error_vanilla)]),
+        max([s + e for s, e in zip(salt_cpl, std_error_salt)]),
+    )
     ax.set_ylim(0.0, y_top)
 
     annotate(vanilla_rects, y_top)
