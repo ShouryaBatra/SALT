@@ -454,10 +454,24 @@ def main():
         if steering_vector is None:
             raise FileNotFoundError(f"Steering vector not found or invalid: {args.steering_vector_path}")
 
-    total_batches = (len(prompts) + args.batch_size - 1) // args.batch_size
-    for batch_idx in range(0, len(prompts), args.batch_size):
-        batch_end = min(batch_idx + args.batch_size, len(prompts))
-        batch_prompts = prompts[batch_idx:batch_end]
+    # Determine which prompts to run (skip already processed if resuming)
+    all_pairs = list(zip(valid_indices, prompts))
+    if args.resume and len(processed_indices) > 0:
+        run_pairs = [pair for pair in all_pairs if pair[0] not in processed_indices]
+    else:
+        run_pairs = all_pairs
+    indices_to_run = [i for (i, _) in run_pairs]
+    prompts_to_run = [p for (_, p) in run_pairs]
+    if args.resume:
+        try:
+            print(f"[RESUME] Found {len(processed_indices)} completed examples; will run {len(prompts_to_run)} remaining.")
+        except Exception:
+            pass
+
+    total_batches = (len(prompts_to_run) + args.batch_size - 1) // args.batch_size
+    for batch_idx in range(0, len(prompts_to_run), args.batch_size):
+        batch_end = min(batch_idx + args.batch_size, len(prompts_to_run))
+        batch_prompts = prompts_to_run[batch_idx:batch_end]
         batch_texts = prepare_batch_prompts(batch_prompts, tokenizer, is_gemma=is_gemma)
 
         try:
@@ -523,7 +537,7 @@ def main():
 
             # Update data
             for i, output_text in enumerate(batch_outputs):
-                data_idx = valid_indices[batch_idx + i]
+                data_idx = indices_to_run[batch_idx + i]
                 if data_idx in processed_indices:
                     continue
                 prompt_text = batch_texts[i]
