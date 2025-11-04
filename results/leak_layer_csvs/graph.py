@@ -9,7 +9,7 @@ import numpy as np
 # For demonstration, creating sample data
 # Replace with your actual data loading:
 out_dir = "results/leak_layer_csvs/"
-df = pd.read_csv(f"{out_dir}/qwq_leak_layer_ranking_thr_0_5.csv").sort_values("layer")
+df = pd.read_csv(f"{out_dir}/gemma_leak_layer_ranking_thr_0_4.csv").sort_values("layer")
 layers = df["layer"].to_numpy()
 counts = df["flagged_count"].to_numpy()
 
@@ -39,8 +39,8 @@ fig.add_trace(go.Bar(
 fig.update_layout(
     # Title styling
     title=dict(
-        text='Flagged Neurons by Layer for QwQ-32B',
-        font=dict(size=30, family='Times New Roman, serif', color='#000000', weight=600),
+        text='Flagged Neurons by Layer for Gemma-7B-it',
+        font=dict(size=40, family='Times New Roman, serif', color='#000000', weight=600),
         x=0.5,
         xanchor='center',
         y=0.96,
@@ -51,10 +51,10 @@ fig.update_layout(
     xaxis=dict(
         title=dict(
             text='Layer Index',
-            font=dict(size=26, family='Times New Roman, serif', color='#000000', weight=500),
-            standoff=15
+            font=dict(size=31, family='Times New Roman, serif', color='#000000', weight=500),
+            standoff=25
         ),
-        tickfont=dict(size=20, family='Times New Roman, serif', color='#000000'),
+        tickfont=dict(size=25, family='Times New Roman, serif', color='#000000'),
         showgrid=False,
         showline=True,
         linewidth=2,
@@ -65,16 +65,17 @@ fig.update_layout(
         # showticklabels=True,
         tickwidth=1.5,
         ticklen=6,
-        tickcolor='#000000'
+        tickcolor='#000000',
+        automargin=True
     ),
     
     yaxis=dict(
         title=dict(
             text='Flagged Neurons (|d| ≥ 0.5)',
-            font=dict(size=24, family='Times New Roman, serif', color='#000000', weight=500),
+            font=dict(size=29, family='Times New Roman, serif', color='#000000', weight=500),
             standoff=15
         ),
-        tickfont=dict(size=20, family='Times New Roman, serif', color='#000000'),
+        tickfont=dict(size=25, family='Times New Roman, serif', color='#000000'),
         showgrid=True,
         gridcolor='#D3D3D3',
         gridwidth=0.8,
@@ -97,7 +98,7 @@ fig.update_layout(
     paper_bgcolor='white',
     width=1200,
     height=450,
-    margin=dict(l=90, r=40, t=80, b=70),
+    margin=dict(l=90, r=40, t=80, b=110),
     
     # Font family for consistency
     font=dict(family='Times New Roman, serif', color='#000000'),
@@ -117,7 +118,7 @@ fig.update_yaxes(mirror=False)
 
 
 # Save as PDF (vector format - best for LaTeX papers)
-fig.write_image('neurips_barplot.pdf', 
+fig.write_image('gemma_neurips_barplot.pdf', 
                 width=1200, height=450)
 
 
