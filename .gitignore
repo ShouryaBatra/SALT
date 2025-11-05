@@ -1,8 +1,3 @@
 venv/
-qwen2.5-1.5b/
 datasets/
 .env
-results/tiny_test_cot (2).json
-leak_eval/results/activations
-leak_eval/results/steered_activations
-leak_eval/results/steering_vectors
