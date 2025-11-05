@@ -2,13 +2,27 @@
 
 ### Overview
 
-This is our research codebase for SALT. Includes evaluating and steering large language models to reduce privacy leakage in chain-of-thought (CoT) reasoning. It contains scripts to:
+This is our research codebase for SALT (ArXiV link added here when available). Includes evaluating and steering large language models to reduce privacy leakage in chain-of-thought (CoT) reasoning. It contains scripts to:
 
 - run baseline and steered generations while capturing layer activations,
 - compute privacy/utility metrics (with optional LLM-as-a-judge), and
 - analyze which layers are most associated with leakage and save steering vectors.
 
-If you use this repository in academic work, please cite the accompanying paper.
+If you use this repository in academic work, please cite the accompanying paper:
+
+Paper & citation not yet publicly available
+<!-- ```bibtex
+@misc{tillman2025ppsv,
+      title={{PPSV}: Using Steering Vectors to Mitigate Internal Reasoning Privacy Leakage in Large Language Models},
+      author={Pierce Tillman and Samarth Gaggar and Shourya Batra and Shashank Kesineni and Kevin Zhu and Sunishchal Dev and Maheep Chaudhary},
+      year={2025},
+      eprint={TBD},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      note={Project AlgoVerse AI Research},
+      url={https://github.com/AlgoVerseAI/PPSV}, 
+}
+``` -->
 
 ### Repository structure
 
@@ -58,7 +72,10 @@ Results schema (abridged)
 
 ### Citation
 
-Please cite SALT (add BibTeX/DOI/arXiv once available), and possibly the Leaky Thoughts paper we build off of.
+(Add SALT BibTeX/DOI/arXiv citation when available)
+
+We build off of work by Tomasso Green et al. in [Leaky Thoughts: Large Reasoning Models Are Not Private Thinkers](https://arxiv.org/abs/2506.15674), as well as in the [AirGapAgent-R Dataset](https://huggingface.co/datasets/parameterlab/leaky_thoughts)
+<!-- Please cite SALT (add BibTeX/DOI/arXiv once available), and possibly the Leaky Thoughts paper we build off of. -->
 
 ### License
 
