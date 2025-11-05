@@ -2,7 +2,7 @@
 
 ### Overview
 
-This is our research codebase for SALT (ArXiV link added here when available). Includes evaluating and steering large language models to reduce privacy leakage in chain-of-thought (CoT) reasoning. It contains scripts to:
+This is our research codebase for SALT. Includes evaluating and steering large language models to reduce privacy leakage in chain-of-thought (CoT) reasoning. It contains scripts to:
 
 - run baseline and steered generations while capturing layer activations,
 - compute privacy/utility metrics (with optional LLM-as-a-judge), and
@@ -10,7 +10,7 @@ This is our research codebase for SALT (ArXiV link added here when available). I
 
 If you use this repository in academic work, please cite the accompanying paper:
 
-Paper & citation not yet publicly available
+*Paper & citation not yet publicly available*
 <!-- ```bibtex
 @misc{tillman2025ppsv,
       title={{PPSV}: Using Steering Vectors to Mitigate Internal Reasoning Privacy Leakage in Large Language Models},
@@ -70,11 +70,10 @@ Results schema (abridged)
 
 - `eval_cp.py` writes a JSON with at least `data` (list of examples with outputs/metrics) and `summary` (aggregate metrics, averages). When GPT eval is run, the summary also includes `gpt_utility_score`, `gpt_pii_leakage`, and `total_gpt_api_cost`.
 
-### Citation
+### Acknowledgements
 
-(Add SALT BibTeX/DOI/arXiv citation when available)
-
-We build off of work by Tomasso Green et al. in [Leaky Thoughts: Large Reasoning Models Are Not Private Thinkers](https://arxiv.org/abs/2506.15674), as well as in the [AirGapAgent-R Dataset](https://huggingface.co/datasets/parameterlab/leaky_thoughts)
+This work builds upon *Leaky Thoughts: Large Reasoning Models Are Not Private Thinkers* by Tommaso Green, Martin Gubri, Haritz Puerto, Sangdoo Yun, and Seong Joon Oh 
+([arXiv:2506.15674](https://arxiv.org/abs/2506.15674)), and the accompanying [AirGapAgent-R Dataset](https://huggingface.co/datasets/parameterlab/leaky_thoughts).
 <!-- Please cite SALT (add BibTeX/DOI/arXiv once available), and possibly the Leaky Thoughts paper we build off of. -->
 
 ### License
