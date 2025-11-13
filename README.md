@@ -10,19 +10,17 @@ This is our research codebase for SALT. Includes evaluating and steering large l
 
 If you use this repository in academic work, please cite the accompanying paper:
 
-*Paper & citation not yet publicly available*
-<!-- ```bibtex
-@misc{tillman2025ppsv,
-      title={{PPSV}: Using Steering Vectors to Mitigate Internal Reasoning Privacy Leakage in Large Language Models},
-      author={Pierce Tillman and Samarth Gaggar and Shourya Batra and Shashank Kesineni and Kevin Zhu and Sunishchal Dev and Maheep Chaudhary},
+```bibtex
+@misc{batra2025saltsteeringactivationsleakagefree,
+      title={SALT: Steering Activations towards Leakage-free Thinking in Chain of Thought}, 
+      author={Shourya Batra and Pierce Tillman and Samarth Gaggar and Shashank Kesineni and Kevin Zhu and Sunishchal Dev and Ashwinee Panda and Vasu Sharma and Maheep Chaudhary},
       year={2025},
-      eprint={TBD},
+      eprint={2511.07772},
       archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      note={Project AlgoVerse AI Research},
-      url={https://github.com/AlgoVerseAI/PPSV}, 
+      primaryClass={cs.CR},
+      url={https://arxiv.org/abs/2511.07772}, 
 }
-``` -->
+```
 
 ### Repository structure
 
