@@ -1,6 +1,7 @@
 # SALT: Steering Activations towards Leakage-free Thinking in Chain of Thought
-Paper: [https://www.arxiv.org/abs/2511.07772](https://www.arxiv.org/abs/2511.07772)
-
+Paper: [https://www.arxiv.org/abs/2511.07772](https://www.arxiv.org/abs/2511.07772)  
+Accepted to [Neurips25 ResponsibleFM Workshop](https://responsible-fm.github.io/), [AAAI26-Trustworthy Agentic AI Workshop
+](https://trustagenticai.github.io/AAAI2026/)
 ### Overview
 
 This is our research codebase for SALT. Includes evaluating and steering large language models to reduce privacy leakage in chain-of-thought (CoT) reasoning. It contains scripts to:
