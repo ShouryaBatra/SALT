@@ -1,4 +1,5 @@
 # SALT: Steering Activations towards Leakage-free Thinking in Chain of Thought
+Paper: [https://www.arxiv.org/abs/2511.07772](https://www.arxiv.org/abs/2511.07772)
 
 ### Overview
 
