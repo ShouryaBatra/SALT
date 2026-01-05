@@ -82,3 +82,6 @@ Contact & contributions
 Issues and PRs are welcome. For substantive contributions, please open an issue first to discuss scope. If you build on SALT, let us know—happy to link community extensions here.
 
 ### Developers
+
+Shourya Batra
+- Sophomore at Homestead High School who enjoys experimenting with LLMs and playing volleyball and the Euphonium.
