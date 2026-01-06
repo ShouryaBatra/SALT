@@ -90,7 +90,7 @@ Pierce Tillman
 - Junior at West Campus High School who loves to search for new ways to make LLMs more intuitive and enthusiast photographer (check out my work on Instagram @warrriorwatch)
 
 Samarth Gaggar
-- Sophomore at Dublin High School who loves learning why LLMs behave the way they do and enjoys robotics, debate, and photography.
+- Sophomore at Dublin High School who enjoys understanding LLM trustworthiness analysis as well as robotics, debate, and research.
 
 Shashank Kesineni
 - Sophomore at Rock Ridge High School who loves learning why LLMs behave the way they do and enjoys soccer, debate, and volunteering.
