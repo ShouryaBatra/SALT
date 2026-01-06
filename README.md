@@ -88,3 +88,6 @@ Shourya Batra
 
 Samarth Gaggar
 - Sophomore at Dublin High School who loves learning why LLMs behave the way they do and enjoys robotics, debate, and photography.
+
+Pierce Tillman
+- Junior at West Campus High School who loves to search for new ways to make LLMs more intuitive and enthusiast photographer (check out my work on Instagram @warrriorwatch)
