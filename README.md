@@ -92,3 +92,6 @@ Pierce Tillman
 Samarth Gaggar
 - Sophomore at Dublin High School who loves learning why LLMs behave the way they do and enjoys robotics, debate, and photography.
 
+Shashank Kesineni
+- Sophomore at Rock Ridge High School who loves learning why LLMs behave the way they do and enjoys soccer, debate, and volunteering.
+
