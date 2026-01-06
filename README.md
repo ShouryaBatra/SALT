@@ -86,8 +86,9 @@ Issues and PRs are welcome. For substantive contributions, please open an issue 
 Shourya Batra
 - Sophomore at Homestead High School who enjoys experimenting with LLMs and playing volleyball and the Euphonium.
 
+Pierce Tillman
+- Junior at West Campus High School who loves to search for new ways to make LLMs more intuitive and enthusiast photographer (check out my work on Instagram @warrriorwatch)
+
 Samarth Gaggar
 - Sophomore at Dublin High School who loves learning why LLMs behave the way they do and enjoys robotics, debate, and photography.
 
-Pierce Tillman
-- Junior at West Campus High School who loves to search for new ways to make LLMs more intuitive and enthusiast photographer (check out my work on Instagram @warrriorwatch)
